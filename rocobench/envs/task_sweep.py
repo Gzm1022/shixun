@@ -37,6 +37,8 @@ SWEEP_BROOM_OFFSET=0.432 # fix height offset for panda's broom handle, obs.panda
 SWEEP_DUSTPAN_HEIGHT=0.23
 SWEEP_TASK_CONTEXT="""Alice is a robot holding a dustpan, Bob is a robot holding a broom, together they must sweep up all the cubes on the table.
 To sweep up a cube, Alice must place the dustpan to one side, while Bob must sweep the cube from the other side into the dustpan.
+Use a synchronized three-stage cycle for each cube: first both MOVE to the same cube, then Alice WAITs while Bob SWEEPs that same cube, then Alice DUMPs while Bob WAITs.
+Do not let Bob move ahead to the next cube while Alice is still moving, sweeping, or dumping the current cube.
 At each round, given 'Scene description' and 'Environment feedback', use it to reason about the task, and improve any previous plans. Each robot does **exactly** one action per round.\n
 """
 
@@ -46,12 +48,16 @@ SWEEP_ACTION_SPACE="""
 2) SWEEP <target>, this moves the groom so it pushes the <target> into dustpan, only Bob can SWEEP, Alice must WAIT in front of the same <target> cube when Bob SWEEP.
 3) WAIT, stays at the current spot.
 4) DUMP, only when there are one or more cubes in the dustpan, Alice can DUMP it into trash_bin.
-Only SWEEP a cube after both robots MOVEed to the cube.
+Strict coordination rules:
+- To approach a cube, Alice and Bob must both MOVE to the same cube in the same round.
+- Only SWEEP a cube after both robots have already MOVEed to that same cube.
+- While Bob SWEEPs, Alice must WAIT at that cube with the dustpan.
+- After a cube enters the dustpan, Alice must DUMP and Bob must WAIT before either robot moves to a new cube.
 [Action Output Instruction]
 Must first output 'EXECUTE\n', then give exactly one action per robot, put each on a new line.
 Example#1: 'EXECUTE\nNAME Alice ACTION MOVE red_cube\nNAME Bob ACTION MOVE red_cube\n'
 Example#2: 'EXECUTE\nNAME Alice ACTION WAIT\nNAME Bob ACTION SWEEP red_cube\n'
-Example#3: 'EXECUTE\nNAME Alice ACTION DUMP\nNAME Bob ACTION MOVE green_cube\n'
+Example#3: 'EXECUTE\nNAME Alice ACTION DUMP\nNAME Bob ACTION WAIT\n'
 """
 
 SWEEP_CHAT_PROMPT="""They discuss to find the best strategy. When each robot talk, it first reflects on the task status and its own capability. 
@@ -60,7 +66,7 @@ They talk in order [Alice],[Bob],[Alice],..., then, after reaching agreement, pl
 Their entire chat history and the final plan are: """
 
 SWEEP_PLAN_PROMPT="""
-Plan one action for each robot at every round. Analyze the task status and plan for each robot based on its current capability. Make sure they focus on the same cube to sweep.
+Plan one action for each robot at every round. Use this synchronized cycle for each cube: MOVE together to the same cube, then Alice WAIT and Bob SWEEP that cube, then Alice DUMP and Bob WAIT. Finish the current cube before selecting a new cube.
 """
 class SweepTask(MujocoSimEnv):
     def __init__( 
@@ -117,12 +123,85 @@ class SweepTask(MujocoSimEnv):
         )
          
         self.align_threshold = 0.1
-        
+
+    def _parse_action_target(self, action_str: str, keyword: str) -> Optional[str]:
+        if keyword not in action_str:
+            return None
+        target = action_str.split(keyword, 1)[1].strip()
+        if len(target) == 0:
+            return None
+        return target.split()[0].replace(" ", "_")
+
+    def _cube_in_dustpan(self, cube_name: str) -> bool:
+        contacts = self.get_contact().get(cube_name, [])
+        return "dustpan_bottom" in contacts
+
+    def _cube_in_trash(self, cube_name: str) -> bool:
+        contacts = self.get_contact().get(cube_name, [])
+        return "trash_bin_bottom" in contacts
+
+    def _any_cube_in_dustpan(self) -> bool:
+        return any(self._cube_in_dustpan(cube) for cube in self.cube_names)
+
+    def _robot_ready_at_cube(self, agent_name: str, cube_name: str) -> bool:
+        target = self.get_target_pos(agent_name, cube_name)
+        if target is None:
+            return False
+        if agent_name == "Alice":
+            current = self.physics.data.site("dustpan_bottom").xpos.copy()
+        else:
+            current = self.physics.data.site("broom_bottom").xpos.copy()
+        return np.linalg.norm(current[:2] - target[:2]) <= 0.25
+         
     def get_task_feedback(self, llm_plan, pose_dict):
         feedback = ""
-        if 'SWEEP' in llm_plan.action_strs.get('Bob', ''):
-            if "WAIT" not in llm_plan.action_strs.get('Alice', ''):
+        alice_action = llm_plan.action_strs.get("Alice", "")
+        bob_action = llm_plan.action_strs.get("Bob", "")
+
+        if "SWEEP" in alice_action:
+            return "Only Bob can SWEEP. Alice holds the dustpan and should WAIT during SWEEP."
+        if "DUMP" in bob_action:
+            return "Only Alice can DUMP. Bob holds the broom and should WAIT during DUMP."
+
+        if self._any_cube_in_dustpan() and "DUMP" not in alice_action:
+            return "A cube is already inside the dustpan. Alice must DUMP it into trash_bin now, and Bob must WAIT."
+
+        if "DUMP" in alice_action:
+            if "WAIT" not in bob_action:
+                return "Bob must WAIT while Alice DUMPs; do not move Bob to the next cube early."
+            if not self._any_cube_in_dustpan():
+                return "Alice can DUMP only when at least one cube is inside the dustpan."
+
+        alice_move_target = self._parse_action_target(alice_action, "MOVE")
+        bob_move_target = self._parse_action_target(bob_action, "MOVE")
+        if alice_move_target is not None or bob_move_target is not None:
+            for cube_name in self.cube_names:
+                if (not self._cube_in_dustpan(cube_name) and
+                        not self._cube_in_trash(cube_name) and
+                        self._robot_ready_at_cube("Alice", cube_name) and
+                        self._robot_ready_at_cube("Bob", cube_name)):
+                    return (f"Both robots are already positioned at {cube_name}. "
+                            f"Do NOT MOVE again. Next: Alice WAIT, Bob SWEEP {cube_name}.")
+            if alice_move_target is None or bob_move_target is None:
+                return "Alice and Bob must MOVE together to the same cube; one robot should not move ahead alone."
+            if alice_move_target != bob_move_target:
+                return "Alice and Bob must MOVE to the same cube in the same round."
+            if alice_move_target not in self.cube_names:
+                return "MOVE target must be a cube."
+            if self._cube_in_dustpan(alice_move_target) or self._cube_in_trash(alice_move_target):
+                remaining = [c for c in self.cube_names
+                             if not self._cube_in_dustpan(c) and not self._cube_in_trash(c)]
+                hint = f" Remaining cubes: {remaining}." if remaining else " All cubes are done."
+                return f"{alice_move_target} is already swept (in trash_bin); choose another cube.{hint}"
+
+        bob_sweep_target = self._parse_action_target(bob_action, "SWEEP")
+        if bob_sweep_target is not None:
+            if "WAIT" not in alice_action:
                 feedback = "Alice must WAIT while Bob SWEEPs"
+            elif bob_sweep_target not in self.cube_names:
+                feedback = "SWEEP target must be a cube."
+            elif not self._robot_ready_at_cube("Alice", bob_sweep_target):
+                feedback = f"Alice is not positioned at {bob_sweep_target}; both robots must MOVE to that cube before Bob SWEEPs."
         for agent_name, action_str in llm_plan.action_strs.items():
             if 'MOVE' in action_str and "cube" not in action_str:
                 feedback = "MOVE target must be a cube, you can directly dump without moving to trash_bin"
@@ -391,7 +470,7 @@ class SweepTask(MujocoSimEnv):
         if 'dustpan_bottom' in contacts:
             cube_desp += f"inside dustpan; "
         elif 'trash_bin_bottom' in contacts:
-            cube_desp += f"inside trash_bin; "
+            cube_desp += f"DONE - already swept into trash_bin, do NOT target this cube again; "
         else:
             cube_desp += f"on the table; "
         return cube_desp
@@ -413,6 +492,7 @@ class SweepTask(MujocoSimEnv):
 You are a robot called {agent_name}, and you are collaborating with {other_robot} to sweep up all the cubes on the table.
 You hold a {tool}. 
 To sweep up a cube, you and {other_robot} must get close to it by MOVE to opposite sides of the same cube. {instruction}
+Use the strict cycle: MOVE together to the same cube, then Alice WAIT and Bob SWEEP, then Alice DUMP and Bob WAIT. Do not start the next cube until the current cube is dumped.
 Talk with {other_robot} to coordinate together and decide which cube to sweep up first.
 At the current round:
 {agent_state}
@@ -502,5 +582,4 @@ if __name__ == "__main__":
     # 
     # plt.show()
     # im.save('sorting_seed0.jpg')
-
 

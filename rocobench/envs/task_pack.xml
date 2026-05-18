@@ -56,8 +56,8 @@
         <geom name="bin_inside_bottom" pos="0 0 0" size="0.35 0.2 0.02" type="box" group="3" friction="1 0.005 0.0001" material="light-wood" /> 
         <geom name="bin_inside_front" pos="0 0.2 0.03" size="0.35 0.01 0.06" type="box" group="3" friction="1 0.005 0.0001" material="light-wood" />  
         <geom name="bin_inside_back" pos="0 -0.2 0.03" size="0.35 0.01 0.06" type="box" group="3" friction="1 0.005 0.0001" material="light-wood" />
-        <geom name="bin_inside_right" pos="0.38 0 0.03" size="0.01 0.18 0.06" type="box" group="3" friction="1 0.005 0.0001" rgba="1 0 0 0" />
-        <geom name="bin_inside_left" pos="-0.38 0 0.03" size="0.01 0.18 0.06" type="box" group="3" friction="1 0.005 0.0001" rgba="1 0 0 0" />
+        <geom name="bin_inside_right" pos="0.38 0 0.03" size="0.01 0.18 0.06" type="box" group="3" friction="1 0.005 0.0001" material="light-wood" />
+        <geom name="bin_inside_left" pos="-0.38 0 0.03" size="0.01 0.18 0.06" type="box" group="3" friction="1 0.005 0.0001" material="light-wood" />
       </body>
       <geom name="bin_right" pos="0.35 0 0.03" size="0.01 0.2 0.06" type="box" group="3" friction="1 0.005 0.0001" material="light-wood" margin="0.01" />
       <geom name="bin_left" pos="-0.35 0 0.03" size="0.01 0.2 0.06" type="box" group="3" friction="1 0.005 0.0001" material="light-wood" margin="0.01"/>
@@ -136,8 +136,8 @@
     <body name="soda_can" pos="-0.4 0.6 0.25" > 
       <freejoint name="soda_can_joint"/>
       <geom name="soda_can_contact" pos="0 0 0" type="box" rgba="0.1 0.1 0.2 0"  size="0.037 0.04 0.057" friction="0.95 0.6 0.1" density="1000" />
-       <!-- <geom name="soda_can_contact" pos="0 0 0" type="cylinder" rgba="0.1 0.1 0.2 0"  size="0.037 0.06" group="3" density="500"/> -->
-      <geom pos="0 0 0" mesh="can_mesh" type="mesh" class="object_visual" material="can" />   
+       <geom name="soda_can_cyl" pos="0 0 0" type="cylinder" rgba="0.1 0.1 0.2 0"  size="0.037 0.06" group="3" density="500"/>
+      <geom pos="0 0 0" mesh="can_mesh" type="mesh" class="object_visual" material="can" />
       
       <site name="soda_can_top"  pos="0 0 0.08"   class="site_top" /> 
       <site name="soda_can_bottom" pos="0 0 -0.06" class="site_bottom" />
@@ -223,3 +223,4 @@
   </keyframe>
  
 </mujoco>
+

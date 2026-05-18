@@ -70,7 +70,6 @@ class SortOneBlockTask(MujocoSimEnv):
     def __init__( 
         self,
         filepath: str = "rocobench/envs/task_sort.xml", 
-        one_obj_each: bool = False,
         **kwargs,
     ):    
         self.robot_names = ["ur5e_robotiq", "panda", "ur5e_suction"] 
@@ -399,9 +398,18 @@ In the plan, at least one robot should be acting, you can't all WAIT.
                 slot_name = "_".join(slot_name.split("_")[:-1])
                 cube_desp = f"{cube_name} is in {slot_name}"
                 break 
+        target_panel = self.cube_to_bin.get(cube_name, "?")
         if len(cube_desp) == 0:
             closest_panel = self.get_cube_panel(obs, cube_name)
-            cube_desp = f"{cube_name} is on {closest_panel}"
+            if closest_panel == target_panel:
+                cube_desp = f"{cube_name} is on {closest_panel} (DONE - at target)"
+            else:
+                cube_desp = f"{cube_name} is on {closest_panel} (target: {target_panel}, needs to move)"
+        else:
+            if target_panel in cube_desp:
+                cube_desp += f" (DONE)"
+            else:
+                cube_desp += f" (target: {target_panel}, needs to move)"
         return cube_desp
 
     def describe_obs(self, obs: EnvState):
@@ -488,14 +496,34 @@ In the plan, at least one robot should be acting, you can't all WAIT.
                     feedback += f"{agent_name}'s ACTION must contain both PICK and PLACE"
             if 'PICK' in action_str and 'PLACE' in action_str:
                 obj = action_str.split('PICK')[1].split('PLACE')[0].strip()
-                target = action_str.split('PLACE')[1].strip()
-                if obj in self.cube_names and target in self.cube_to_bin.values():
-                    correct_panel = self.cube_to_bin[obj]
-                    if correct_panel not in target:
-                        valid_panels = ", ".join(
-                            [correct_panel, 'panel3', 'panel5']
-                        )
-                        feedback += f"{agent_name}'s ACTION is not valid, {obj} cube can only be placed on {valid_panels}, but not on {target}"
+                target = action_str.split('PLACE')[1].strip().split()[0]
+                if obj in self.cube_names:
+                    target_final = self.cube_to_bin[obj]
+                    # Check reach range: agent can only PLACE on their reachable panels
+                    if target not in self.reachable_panels.get(agent_name, []):
+                        reachable = ", ".join(self.reachable_panels.get(agent_name, []))
+                        feedback += (f"{agent_name} cannot PLACE on {target}; "
+                                     f"{agent_name} can only reach {reachable}. Use these as intermediate panels.\n")
+                        continue
+                    # No-op check: cube already at target panel (position-based)
+                    try:
+                        cube_pos = self.physics.data.site(f"{obj}_top").xpos[:2]
+                        if target in self.panel_coords:
+                            panel_pos = self.panel_coords[target][:2]
+                            dist = np.linalg.norm(cube_pos - panel_pos)
+                            if dist < 0.20:
+                                feedback += (f"{agent_name}: {obj} is already at {target} (dist={dist:.2f}), "
+                                             f"placing it back is a no-op. "
+                                             f"It still needs to reach {target_final}. "
+                                             f"A different robot should move it further.\n")
+                                continue
+                    except Exception:
+                        pass
+                    # Wrong final panel check
+                    if target in self.cube_to_bin.values():
+                        if self.cube_to_bin[obj] != target:
+                            valid_panels = ", ".join([target_final, 'panel3', 'panel5'])
+                            feedback += f"{agent_name}'s ACTION is not valid, {obj} cube can only be placed on {valid_panels}, but not on {target}"
         if all(['WAIT' in action_str for action_str in llm_plan.action_strs.values()]):
             feedback += f"You can't all WAIT. The task is not complete, at least one robot should be acting."
         return feedback 
@@ -554,5 +582,7 @@ if __name__ == "__main__":
     print(env.get_agent_prompt(obs, "Alice"))
     breakpoint()
     img=env.physics.render(camera_id="teaser", height=480, width=600)
+
+
 
 
