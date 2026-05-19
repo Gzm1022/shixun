@@ -378,21 +378,61 @@ Sweep 的重点不是目标映射，而是同步协作和物理接触：
 - 增加 dustpan ready 距离和朝向检查；
 - 让 fallback 根据 cube 到 dustpan 的几何关系选择更安全目标。
 
-## 6. 指标汇总模板
+## 6. 当前实验结果汇总
 
-实验完成后可以按如下表格总结：
+以下结果来自当前 `data/` 目录中已有的 `steps*_success_*.json` 和 `local_eval_summary.json`。其中部分目录不是完整 5 次评测，例如 `rope_default_eval_seed42` 当前只有 3 个 run，`sort_hard_eval_seed42` 当前只有 1 个 run；后续补跑后应继续更新表格。
 
 | Task | Variant | Runs | Success | Success Rate | Timeout | Avg Time | Main Failure |
 |---|---:|---:|---:|---:|---:|---:|---|
 | Sort | default | 5 | 5 | 100% | 0 | 66.1s | none |
-| Sort | medium | 5 | TBD | TBD | TBD | TBD | TBD |
-| Sort | hard | 5 | TBD | TBD | TBD | TBD | TBD |
-| Rope | default | 5 | TBD | TBD | TBD | TBD | TBD |
-| Rope | medium | 5 | 3 | 60% | 2 | 343.0s | RRT/IK timeout |
+| Sort | medium | 5 | 1 | 20.0% | 4 | 654.3s | timeout after perturbation |
+| Sort | hard | 1 | 0 | 0.0% | 1 | 626.8s | partial run, timeout |
+| Rope | default | 3 | 3 | 100% | 0 | 57.9s | none in current partial sample |
+| Rope | medium | 9 | 5 | 55.6% | 4 | 380.5s | RRT/IK timeout |
 | Rope | hard | 5 | TBD | TBD | TBD | TBD | TBD |
 | Sweep | default | 5 | TBD | TBD | TBD | TBD | TBD |
-| Sweep | medium | 5 | TBD | TBD | TBD | TBD | TBD |
+| Sweep | medium | 5 | 0 | 0.0% | 5 | 1112.8s | all runs timeout |
 | Sweep | hard | 5 | TBD | TBD | TBD | TBD | TBD |
+
+### 6.1 数据来源
+
+已聚合的目录包括：
+
+```text
+data/sort_default_eval_seed42
+data/sort_medium_perturb
+data/sort_hard_eval_seed42
+data/rope_default_eval_seed42
+data/rope_medium_eval_seed42
+data/sweep_medium_perturb
+```
+
+当前 `local_eval_summary.json` 只存在于：
+
+```text
+data/sort_default_eval_seed42/local_eval_summary.json
+data/rope_medium_eval_seed42/local_eval_summary.json
+```
+
+其余目录通过 `steps*_success_*.json` 反向聚合得到。
+
+### 6.2 结果分析
+
+Sort default 达到 `5/5 = 100%`，且没有 timeout，说明原始固定场景下，Sort 的状态化 fallback、panel3/panel5 中转策略、parser 抓取高度修正和 handoff 位置修正已经形成稳定闭环。
+
+Sort medium 降到 `1/5 = 20%`，且 `4/5` timeout，说明一旦物体初始 panel 和 panel 内偏移发生变化，现有 Sort 方案仍有较强的固定流程依赖。它能处理原始 benchmark 的典型接力链路，但在扰动场景下可能出现重复搬运、错误中转、RRT 长时间搜索或目标物体选择顺序不理想等问题。Sort hard 当前只有 1 个 run，结果为 timeout，样本不足但提示高难目标映射打乱会进一步放大问题。
+
+Rope default 当前 3 个 run 全部成功，平均约 `57.9s`，说明默认 Rope fallback 在较常规几何关系下可以快速完成。Rope medium 使用 9 个 run 统计后为 `5/9 = 55.6%`，其中 4 次 timeout。成功样例基本在 step 1 完成，失败样例多在 step 3 卡住，说明 Rope 的主要瓶颈不是语义理解，而是扰动后的连续物理可执行性：绳子端点、障碍墙和 groove 的相对位置稍有不利，就会导致 IK、碰撞或 RRT 搜索爆炸。
+
+Sweep medium 当前 `0/5 = 0%`，且全部 timeout。这说明 Sweep 对扰动非常敏感。中等扰动改变 cube 分布和 trash bin 目标位置后，当前同步 MOVE/WAIT/SWEEP/DUMP fallback 仍能表达正确任务阶段，但物理执行层可能无法稳定完成扫入 dustpan、dump 到移动后的 trash bin，或在密集/偏移 cube 分布下反复规划不可行路径。
+
+### 6.3 后续优化方向
+
+Sort 后续应重点优化动态目标和动态布局下的 relay planner：根据当前 cube panel、target panel 和机器人可达集合生成最短中转链；对扰动场景增加候选动作队列，让 feedback 拒绝 no-op、错误中转和不可达动作；同时修正 `scene_seed` 逻辑，使多 run 使用 `scene_seed + run_id`，保证实验命名和实际采样一致。
+
+Rope 后续应优先处理 timeout：根据 obstacle wall 的当前 top site 动态生成安全 `lane_y` 和 `lift_z`；为 Bob/Panda 增加右侧绕行候选；对 RRT timeout 的候选路径做快速跳过；把失败的 step 3 单独复现，分析是 PICK 后同步 PUT 路径失败，还是 release/落槽阶段失败。
+
+Sweep 后续应从物理策略而非 prompt 先入手：根据 cube 和 trash bin 的几何关系动态选择 sweep 方向；hard/clustered 场景先扫边缘 cube；增加 Alice dustpan 的 ready 判定，不只看距离，也看 dustpan 与 cube 的相对方向；DUMP 动作需要读取扰动后的 trash bin 位置，而不是依赖默认目标区域。
 
 ## 7. 报告表述建议
 
