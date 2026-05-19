@@ -116,6 +116,39 @@ Average Steps: 5.00
 
 这说明当前主要失败点已经从语言规划问题定位为物理交接点问题，并通过 `panel3` handoff 位置修正和保守抓取姿态得到解决。
 
+## 泛化性与过拟合风险
+
+需要注意的是，单次或少量评测达到 100% 并不等于模型或系统已经具备强泛化能力。如果优化方式只是针对固定 seed、固定物体初始位置、固定失败日志写死动作顺序，那么很容易过拟合当前评测场景。
+
+本次 Sort 修改尽量避免直接写固定答案，而是优先加入更通用的机制：
+
+- 使用当前观测判断物体所在 panel、目标 panel 和下一步中转 panel，而不是只记住固定步骤。
+- 使用 `fallback_first` 作为保守兜底策略，减少 LLM 调用失败造成的中断。
+- 将 `panel3` 调整为更合理的交接区域，这是物理可达性修正，而不是单纯针对某一次失败输出硬编码。
+- 在 parser 中加入低位抓取保护，解决交接后物体高度过低导致 IK 不稳定的问题。
+- 对空响应和异常日志做保护，提升系统鲁棒性。
+
+仍然存在的泛化风险：
+
+- 当前 Sort fallback planner 主要基于已有 panel 拓扑和任务物体设计，对完全不同的 Sort 布局未必直接适用。
+- `panel3` handoff 点虽然更符合 Bob 的可达区域，但仍建议在多个 seed、多个 runs 下继续验证。
+- 如果后续为其他任务继续添加规则，应优先抽象成状态表、验证器、失败反馈和物理约束，而不是写死每个任务的固定执行序列。
+
+建议验证方式：
+
+```bash
+OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 5
+```
+
+如果多次运行仍能保持较高成功率，才更能说明这次修改不是单纯“刷一次样例”，而是提升了 Sort 任务的执行稳定性。更进一步，可以改变随机种子进行测试：
+
+```bash
+OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 5 --seed 1
+OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 5 --seed 2
+```
+
+总体来说，本次 100% 结果应理解为：当前失败案例已经被定位并修复，Sort 在当前评测配置下稳定性明显提升；但是否具备更强泛化性，还需要多 seed、多初始状态和更多任务组合继续验证。
+
 ## run_dialog.py 单任务运行
 
 如果不通过 `evaluator.py`，也可以直接运行单个 Sort rollout：
