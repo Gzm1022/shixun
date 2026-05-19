@@ -1001,6 +1001,26 @@ class SingleThreadPrompter:
             pts = [p0 + (t_low - p0) * (i + 1) / 4 for i in range(4)]
             return pts
 
+        def _rope_pick_path(agent_name, start, target):
+            """Generate direct or obstacle-aware pick paths for candidate validation."""
+            if variant == 0:
+                return _low_approach(start, target)
+            s, t = np.asarray(start[:3], dtype=float), np.asarray(target[:3], dtype=float)
+            t_low = t.copy(); t_low[2] = min(max(float(t[2]), 0.32), 0.46)
+            if agent_name == "Alice":
+                lane_y = min(float(s[1]), float(t_low[1]), 0.06)
+            else:
+                lane_y = max(float(s[1]), float(t_low[1]), 0.88)
+            if variant == 1:
+                p1 = s.copy(); p1[2] = min(max(float(s[2]), 0.42), 0.48)
+                p2 = np.array([(s[0] + t_low[0]) * 0.5, lane_y, 0.44])
+                p3 = np.array([t_low[0], lane_y, 0.40])
+                return [p1, p2, p3, t_low]
+            p1 = np.array([s[0], lane_y, min(max(float(s[2]), 0.42), 0.48)])
+            p2 = np.array([(s[0] + t_low[0]) * 0.5, lane_y, 0.46])
+            p3 = np.array([t_low[0], lane_y, 0.42])
+            return [p1, p2, p3, t_low]
+
         def _lift_place(start, target, lift_z=0.54):
             """4-waypoint path that lifts conservatively then descends to target."""
             s, t = np.asarray(start[:3], dtype=float), np.asarray(target[:3], dtype=float)
@@ -1044,9 +1064,8 @@ class SingleThreadPrompter:
         if not alice_holding and not bob_holding:
             a_t = np.asarray(self.env.get_target_pos("Alice", "rope_front_end")[:3], dtype=float)
             b_t = np.asarray(self.env.get_target_pos("Bob", "rope_back_end")[:3], dtype=float)
-            # No x-clamping for PICK: low-z approach (z<=0.50) is safe; x clamping only needed at z>0.55 (PUT phase)
-            a_path = _low_approach(alice_pos, a_t)
-            b_path = _low_approach(bob_pos, b_t)
+            a_path = _rope_pick_path("Alice", alice_pos, a_t)
+            b_path = _rope_pick_path("Bob", bob_pos, b_t)
             return (
                 f"EXECUTE\n"
                 f"NAME Alice ACTION PICK rope_front_end PATH {self._format_path(a_path)}\n"
@@ -1072,7 +1091,7 @@ class SingleThreadPrompter:
         # One holding, one not: the one not holding should pick
         if not alice_holding:
             a_t = np.asarray(self.env.get_target_pos("Alice", "rope_front_end")[:3], dtype=float)
-            a_path = _low_approach(alice_pos, a_t)
+            a_path = _rope_pick_path("Alice", alice_pos, a_t)
             b_path = [bob_pos.copy() for _ in range(4)]
             return (
                 f"EXECUTE\n"
@@ -1081,7 +1100,7 @@ class SingleThreadPrompter:
             )
         else:
             b_t = np.asarray(self.env.get_target_pos("Bob", "rope_back_end")[:3], dtype=float)
-            b_path = _low_approach(bob_pos, b_t)
+            b_path = _rope_pick_path("Bob", bob_pos, b_t)
             a_path = [alice_pos.copy() for _ in range(4)]
             return (
                 f"EXECUTE\n"
