@@ -431,6 +431,11 @@ def main(args):
         args.rrt_timeout = min(args.rrt_timeout, 30)
         logging.warning("PackGroceryTask uses split parsed plans, serial fallback, at least 12 tsteps, and 30s RRT timeout\n")
 
+    elif args.task == 'sandwich':
+        args.fallback_first = True
+        args.tsteps = max(args.tsteps, 8)
+        logging.warning("MakeSandwichTask uses recipe fallback first and at least 8 tsteps for prepick/put rounds\n")
+
     render_freq = 600
     if args.control_freq == 15:
         render_freq = 1200
@@ -438,6 +443,27 @@ def main(args):
         render_freq = 2000
     elif args.control_freq == 5:
         render_freq = 3000
+    env_kwargs = {}
+    if args.task == "sort":
+        env_kwargs.update(
+            sort_variant=args.sort_variant,
+            sort_layout_noise=args.sort_layout_noise,
+            sort_target_mode=args.sort_target_mode,
+        )
+    elif args.task == "rope":
+        env_kwargs.update(
+            rope_variant=args.rope_variant,
+            rope_goal_noise=args.rope_goal_noise,
+            rope_obstacle_noise=args.rope_obstacle_noise,
+            rope_pose_noise=args.rope_pose_noise,
+        )
+    elif args.task == "sweep":
+        env_kwargs.update(
+            sweep_variant=args.sweep_variant,
+            sweep_cube_noise=args.sweep_cube_noise,
+            sweep_target_noise=args.sweep_target_noise,
+        )
+
     env = env_cl(
         render_freq=render_freq,
         image_hw=(400,400),
@@ -449,6 +475,7 @@ def main(args):
         render_cameras=["face_panda","face_ur5e","teaser",],
         one_obj_each=True,
         np_seed=args.seed,
+        **env_kwargs,
     )
     robots = env.get_sim_robots()
     if args.no_feedback:
@@ -526,6 +553,16 @@ if __name__ == "__main__":
     parser.add_argument("--rrt_timeout", type=int, default=200, help="RRT timeout for each planning segment in iterations")
     parser.add_argument("--skip_smooth_path", action="store_true", help="Skip RRT path smoothing to speed up evaluation")
     parser.add_argument("--fallback_first", action="store_true", help="Try deterministic task fallback before querying the LLM")
+    parser.add_argument("--sort_variant", type=str, default="default", choices=["default", "easy", "medium", "hard"], help="Sort scenario perturbation level")
+    parser.add_argument("--sort_layout_noise", type=float, default=0.0, help="Optional Sort panel-local xy jitter in meters")
+    parser.add_argument("--sort_target_mode", type=str, default="fixed", choices=["fixed", "permuted"], help="Whether Sort cube targets stay fixed or are permuted per reset")
+    parser.add_argument("--rope_variant", type=str, default="default", choices=["default", "easy", "medium", "hard"], help="Rope scenario perturbation level")
+    parser.add_argument("--rope_goal_noise", type=float, default=0.0, help="Extra Rope groove xy jitter in meters")
+    parser.add_argument("--rope_obstacle_noise", type=float, default=0.0, help="Extra Rope obstacle xy jitter in meters")
+    parser.add_argument("--rope_pose_noise", type=float, default=0.0, help="Extra Rope initial pose xy jitter in meters")
+    parser.add_argument("--sweep_variant", type=str, default="default", choices=["default", "easy", "medium", "hard"], help="Sweep scenario perturbation level")
+    parser.add_argument("--sweep_cube_noise", type=float, default=0.0, help="Extra Sweep cube xy jitter in meters")
+    parser.add_argument("--sweep_target_noise", type=float, default=0.0, help="Extra Sweep trash-bin xy jitter in meters")
     logging.basicConfig(level=logging.INFO)
 
     args = parser.parse_args()

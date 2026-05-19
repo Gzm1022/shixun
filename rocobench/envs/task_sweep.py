@@ -32,6 +32,45 @@ CUBE_INIT_RANGE = (
     np.array([-1.1, 0.5, 0.2]),
     np.array([-0.6, 0.5, 0.2]),
 )
+SWEEP_DEFAULT_TRASH_BIN_POS = np.array([-0.5, 0.5, 0.05])
+SWEEP_VARIANT_CONFIGS = {
+    "default": dict(
+        cube_low=np.array([-1.1, 0.5, 0.2]),
+        cube_high=np.array([-0.6, 0.5, 0.2]),
+        y_jitter=0.0,
+        min_cube_dist=0.0,
+        trash_low=SWEEP_DEFAULT_TRASH_BIN_POS,
+        trash_high=SWEEP_DEFAULT_TRASH_BIN_POS,
+        clustered=False,
+    ),
+    "easy": dict(
+        cube_low=np.array([-1.0, 0.42, 0.2]),
+        cube_high=np.array([-0.55, 0.58, 0.2]),
+        y_jitter=0.03,
+        min_cube_dist=0.12,
+        trash_low=SWEEP_DEFAULT_TRASH_BIN_POS + np.array([-0.04, -0.04, 0.0]),
+        trash_high=SWEEP_DEFAULT_TRASH_BIN_POS + np.array([0.04, 0.04, 0.0]),
+        clustered=False,
+    ),
+    "medium": dict(
+        cube_low=np.array([-1.15, 0.32, 0.2]),
+        cube_high=np.array([-0.35, 0.68, 0.2]),
+        y_jitter=0.08,
+        min_cube_dist=0.09,
+        trash_low=SWEEP_DEFAULT_TRASH_BIN_POS + np.array([-0.10, -0.08, 0.0]),
+        trash_high=SWEEP_DEFAULT_TRASH_BIN_POS + np.array([0.12, 0.08, 0.0]),
+        clustered=False,
+    ),
+    "hard": dict(
+        cube_low=np.array([-1.20, 0.25, 0.2]),
+        cube_high=np.array([0.00, 0.75, 0.2]),
+        y_jitter=0.12,
+        min_cube_dist=0.06,
+        trash_low=SWEEP_DEFAULT_TRASH_BIN_POS + np.array([-0.15, -0.12, 0.0]),
+        trash_high=SWEEP_DEFAULT_TRASH_BIN_POS + np.array([0.25, 0.12, 0.0]),
+        clustered=True,
+    ),
+}
 SWEEP_FRONT_BOUND=0 # bounds robotiq gripper's y-dim
 SWEEP_BROOM_OFFSET=0.432 # fix height offset for panda's broom handle, obs.panda.ee_xpos[2] - env.physics.data.site('broom_bottom').xpos[2]
 SWEEP_DUSTPAN_HEIGHT=0.23
@@ -73,6 +112,9 @@ class SweepTask(MujocoSimEnv):
         self,
         filepath: str = "rocobench/envs/task_sweep.xml",
         one_obj_each: bool = False,
+        sweep_variant: str = "default",
+        sweep_cube_noise: float = 0.0,
+        sweep_target_noise: float = 0.0,
         **kwargs,
     ):    
         self.robot_names = ["ur5e_robotiq", "panda"] 
@@ -85,6 +127,9 @@ class SweepTask(MujocoSimEnv):
             "Bob": "panda", 
         }
         self.robots = dict()  
+        self.sweep_variant = sweep_variant
+        self.sweep_cube_noise = sweep_cube_noise
+        self.sweep_target_noise = sweep_target_noise
 
         robotiq_config = UR5E_ROBOTIQ_CONSTANTS.copy()
         robotiq_config["all_link_names"].append("dustpan")
@@ -348,8 +393,57 @@ class SweepTask(MujocoSimEnv):
             return dict(x=(-1.3, 1.6), y=(0, 1.5), z=(0, 1))
         else:
             raise NotImplementedError
+
+    def _variant_config(self) -> Dict[str, Any]:
+        return SWEEP_VARIANT_CONFIGS.get(self.sweep_variant, SWEEP_VARIANT_CONFIGS["default"])
+
+    def _sample_vec(self, low: np.ndarray, high: np.ndarray) -> np.ndarray:
+        return self.random_state.uniform(low=np.minimum(low, high), high=np.maximum(low, high))
+
+    def _sample_sweep_cube_positions(self, count: int, height: float) -> List[np.ndarray]:
+        config = self._variant_config()
+        cube_noise = self.sweep_cube_noise
+        low = config["cube_low"] - np.array([cube_noise, cube_noise, 0.0])
+        high = config["cube_high"] + np.array([cube_noise, cube_noise, 0.0])
+        min_dist = float(config["min_cube_dist"])
+
+        if config["clustered"]:
+            center = self._sample_vec(low, high)
+            positions = []
+            for _ in range(count):
+                pos = center.copy()
+                pos[:2] += self.random_state.uniform(low=-0.10 - cube_noise, high=0.10 + cube_noise, size=2)
+                pos[:2] = np.clip(pos[:2], np.minimum(low[:2], high[:2]), np.maximum(low[:2], high[:2]))
+                pos[2] = height
+                positions.append(pos)
+            return positions
+
+        positions = []
+        attempts = 0
+        while len(positions) < count and attempts < 200:
+            attempts += 1
+            pos = self._sample_vec(low, high)
+            pos[1] += self.random_state.uniform(-config["y_jitter"], config["y_jitter"])
+            pos[:2] = np.clip(pos[:2], np.minimum(low[:2], high[:2]), np.maximum(low[:2], high[:2]))
+            pos[2] = height
+            if all(np.linalg.norm(pos[:2] - other[:2]) >= min_dist for other in positions):
+                positions.append(pos)
+        while len(positions) < count:
+            pos = self._sample_vec(low, high)
+            pos[2] = height
+            positions.append(pos)
+        return positions
     
     def sample_initial_scene(self):
+        config = self._variant_config()
+        if self.sweep_variant != "default" or self.sweep_target_noise > 0:
+            target_noise = self.sweep_target_noise
+            trash_pos = self._sample_vec(
+                config["trash_low"] - np.array([target_noise, target_noise, 0.0]),
+                config["trash_high"] + np.array([target_noise, target_noise, 0.0]),
+            )
+            self.reset_body_pose("trash_bin", pos=trash_pos)
+
         # sample locations of the cabinet
         tosample_panels = []
         for n in range(self.physics.model.ngeom):
@@ -361,15 +455,23 @@ class SweepTask(MujocoSimEnv):
                     (low, high)
                 )
         assert len(tosample_panels) >= len(self.cube_names), "Not enough panel positions to sample from"
-        panel_idxs = self.random_state.choice(
-            len(tosample_panels), 
-            len(self.cube_names),
-            replace=False
-            )
-        for _idx, cube_name in zip(panel_idxs, self.cube_names):
-            low, high = tosample_panels[_idx]
-            new_pos = self.random_state.uniform(low, high) 
-            new_pos[2] = self.physics.data.body(cube_name).xpos[2] # height stays same!
+        if self.sweep_variant == "default" and self.sweep_cube_noise <= 0:
+            panel_idxs = self.random_state.choice(
+                len(tosample_panels),
+                len(self.cube_names),
+                replace=False
+                )
+            cube_positions = []
+            for _idx, cube_name in zip(panel_idxs, self.cube_names):
+                low, high = tosample_panels[_idx]
+                new_pos = self.random_state.uniform(low, high)
+                new_pos[2] = self.physics.data.body(cube_name).xpos[2] # height stays same!
+                cube_positions.append(new_pos)
+        else:
+            height = self.physics.data.body(self.cube_names[0]).xpos[2]
+            cube_positions = self._sample_sweep_cube_positions(len(self.cube_names), height)
+
+        for new_pos, cube_name in zip(cube_positions, self.cube_names):
             new_quat = Quaternion(
                 axis=[0,0,1], 
                 angle=self.random_state.uniform(low=0, high=2*np.pi)
@@ -419,6 +521,13 @@ class SweepTask(MujocoSimEnv):
  
     def describe_obs(self, obs: EnvState):
         object_desp =  "[Scene description]\n" 
+        if self.sweep_variant != "default":
+            object_desp += (
+                f"Sweep variant: {self.sweep_variant}; cube distribution and trash_bin target "
+                "position may differ from the original benchmark.\n"
+            )
+        tx, ty, tz = self.physics.data.site("trash_bin_top").xpos
+        object_desp += f"trash_bin target top is at ({tx:.2f}, {ty:.2f}, {tz:.2f})\n"
         on_table_cubes = []
         for name in self.cube_names:
             x,y,z = self.physics.data.site(name).xpos
@@ -524,6 +633,11 @@ End your response by either: 1) output PROCEED, if the plans require further dis
 
     def describe_task_context(self):
         context = SWEEP_TASK_CONTEXT
+        if self.sweep_variant != "default":
+            context += (
+                "\nThis is a perturbed Sweep scene. Read the current Scene description: "
+                "cube locations, density, and trash_bin target position can change each reset."
+            )
         return context
 
     def get_contact(self):

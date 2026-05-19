@@ -31,6 +31,13 @@ SORTING_BIN_NAMES=[
     "panel4",
     "panel6",
 ]
+SORT_TARGET_PANELS = ["panel2", "panel4", "panel6"]
+SORT_PANEL_ORDER = [f"panel{i}" for i in range(1, 8)]
+SORT_DEFAULT_CUBE_TO_BIN = dict(
+    blue_square="panel2",
+    pink_polygon="panel4",
+    yellow_trapezoid="panel6",
+)
 
 SORT_TASK_CONTEXT=""" 
 7 panels on the table, ordered left to right: panel1,...,panel7. They form a straight assembly line, panel1 is closed to panel2 and farthest from panel7.
@@ -71,6 +78,9 @@ class SortOneBlockTask(MujocoSimEnv):
         self,
         filepath: str = "rocobench/envs/task_sort.xml", 
         one_obj_each: bool = False,
+        sort_variant: str = "default",
+        sort_layout_noise: float = 0.0,
+        sort_target_mode: str = "fixed",
         **kwargs,
     ):    
         self.robot_names = ["ur5e_robotiq", "panda", "ur5e_suction"] 
@@ -88,11 +98,21 @@ class SortOneBlockTask(MujocoSimEnv):
         self.robots = dict() 
         self.obj_to_panel = dict()
         self.cube_names = ONE_OBJ_EACH
-        self.cube_to_bin = dict(
-            blue_square="panel2",
-            pink_polygon="panel4",
-            yellow_trapezoid="panel6",
+        self.sort_variant = sort_variant
+        self.sort_layout_noise = sort_layout_noise
+        self.sort_target_mode = sort_target_mode
+        self.cube_to_bin = SORT_DEFAULT_CUBE_TO_BIN.copy()
+        self.reachable_panels = dict(
+            Alice=["panel1", "panel2", "panel3"],
+            Bob=["panel3", "panel4", "panel5"],
+            Chad=["panel5", "panel6", "panel7"],
         )
+        self.panel_to_agent = {
+            "panel2": "Alice",
+            "panel4": "Bob",
+            "panel6": "Chad",
+        }
+        self.cube_targets = self._build_cube_targets()
         
         super(SortOneBlockTask, self).__init__(
             filepath=filepath, 
@@ -150,16 +170,6 @@ class SortOneBlockTask(MujocoSimEnv):
             'panel6': 0.8,
         }         
 
-        self.cube_targets = dict(
-            Alice=("blue_square", "panel2"),
-            Bob=("pink_polygon", "panel4"),
-            Chad=("yellow_trapezoid", "panel6"),
-        )
-        self.reachable_panels = dict(
-            Alice=["panel1", "panel2", "panel3"],
-            Bob=["panel3", "panel4", "panel5"],
-            Chad=["panel5", "panel6", "panel7"],
-        )
         
     @property
     def use_preplace(self):
@@ -182,6 +192,8 @@ class SortOneBlockTask(MujocoSimEnv):
         agent_prompt = f"""
 7 panels on the table, ordered left to right: panel1,...,panel7. They form a straight assembly line, panel1 is closed to panel2 and farthest from panel7.
 You are robot {agent_name} in front of {bin_name}. You are collaborating with {other_robots} to sort cubes into their target panels. The task is NOT done until all three cubes are sorted.
+Current target pairs:
+{self._format_target_pairs()}
 At current round: 
 {cube_states}
 Your goal is to place {cube_name} on {bin_name}, but you can only reach {reachable_panels}: this means you can only pick cubes from these panels, and can only place cubes on these panels.
@@ -255,7 +267,65 @@ In the plan, at least one robot should be acting, you can't all WAIT.
                 return False
         return True
 
+    def _build_cube_targets(self) -> Dict[str, Tuple[str, str]]:
+        targets = {}
+        for cube, panel in self.cube_to_bin.items():
+            agent = self.panel_to_agent.get(panel)
+            if agent is not None:
+                targets[agent] = (cube, panel)
+        for agent, panel in [("Alice", "panel2"), ("Bob", "panel4"), ("Chad", "panel6")]:
+            if agent not in targets:
+                cube = next(c for c, p in self.cube_to_bin.items() if p == panel)
+                targets[agent] = (cube, panel)
+        return targets
+
+    def _format_target_pairs(self) -> str:
+        return "\n".join(
+            f"{cube}: target {target_panel} ({self.panel_to_agent.get(target_panel, 'shared')} final zone)"
+            for cube, target_panel in self.cube_to_bin.items()
+        )
+
+    def _configure_sort_variant_for_reset(self) -> None:
+        if self.sort_variant == "default" or self.sort_target_mode == "fixed":
+            self.cube_to_bin = SORT_DEFAULT_CUBE_TO_BIN.copy()
+        else:
+            target_panels = SORT_TARGET_PANELS.copy()
+            self.random_state.shuffle(target_panels)
+            self.cube_to_bin = dict(zip(self.cube_names, target_panels))
+        self.cube_targets = self._build_cube_targets()
+
+    def _current_layout_noise(self) -> float:
+        if self.sort_layout_noise > 0:
+            return self.sort_layout_noise
+        if self.sort_variant == "easy":
+            return 0.03
+        if self.sort_variant == "medium":
+            return 0.06
+        if self.sort_variant == "hard":
+            return 0.09
+        return 0.0
+
+    def _sample_variant_start_panels(self, cube_name: str) -> List[str]:
+        target = self.cube_to_bin[cube_name]
+        target_idx = int(target.replace("panel", ""))
+        if self.sort_variant == "easy":
+            candidates = [target]
+            for delta in [-1, 1]:
+                idx = target_idx + delta
+                if 1 <= idx <= 7:
+                    candidates.append(f"panel{idx}")
+            return candidates
+        if self.sort_variant == "medium":
+            return [panel for panel in SORT_PANEL_ORDER if panel != target]
+        if self.sort_variant == "hard":
+            return [
+                panel for panel in SORT_PANEL_ORDER
+                if abs(int(panel.replace("panel", "")) - target_idx) >= 2
+            ]
+        return SORT_PANEL_ORDER
+
     def sample_initial_scene(self):
+        self._configure_sort_variant_for_reset()
         # find the pre-defined panel positions in the xml
         tosample_panels = []
         for n in range(self.physics.model.ngeom):
@@ -265,6 +335,7 @@ In the plan, at least one robot should be acting, you can't all WAIT.
                     (geom.name, geom.pos, geom.size)
                 )
         assert len(tosample_panels) >= 3, "Not enough panel positions to sample from"
+        panel_index = {name: i for i, (name, _, _) in enumerate(tosample_panels)}
         
         far_panels = dict()
         far_panels['square'] = [i for i, tup in enumerate(tosample_panels) if tup[1][0] > 0.15] 
@@ -284,11 +355,23 @@ In the plan, at least one robot should be acting, you can't all WAIT.
             stop = qpos_slice.stop
             shape = name.split('_')[1]
             
-            idx = self.random_state.choice(far_panels[shape]) 
-            # remove this index from the list of available panels
-            for shape, idxs in far_panels.items():
-                if idx in idxs:
-                    idxs.remove(idx)
+            if self.sort_variant == "default":
+                idx = self.random_state.choice(far_panels[shape])
+                # remove this index from the list of available panels
+                for shape, idxs in far_panels.items():
+                    if idx in idxs:
+                        idxs.remove(idx)
+            else:
+                candidate_panels = self._sample_variant_start_panels(name)
+                candidate_idxs = [
+                    panel_index[p]
+                    for p in candidate_panels
+                    if p in panel_index and panel_index[p] not in occupied_idxs
+                ]
+                if len(candidate_idxs) == 0:
+                    candidate_idxs = [idx for idx in range(len(tosample_panels)) if idx not in occupied_idxs]
+                idx = self.random_state.choice(candidate_idxs)
+                occupied_idxs.append(idx)
 
             panel_name, panel_pos, panel_size = tosample_panels[idx]
             self.obj_to_panel[name] = panel_name
@@ -298,6 +381,12 @@ In the plan, at least one robot should be acting, you can't all WAIT.
             #     high=panel_pos + panel_size / 2 - 0.001, 
             # )
             new_pos = panel_pos.copy()
+            layout_noise = self._current_layout_noise()
+            if layout_noise > 0:
+                margin = 0.02
+                jitter_xy = self.random_state.uniform(low=-layout_noise, high=layout_noise, size=2)
+                max_jitter = np.maximum(panel_size[:2] - margin, 0.0)
+                new_pos[:2] += np.clip(jitter_xy, -max_jitter, max_jitter)
  
             new_quat = Quaternion(
                 axis=[0,0,1], 
@@ -416,6 +505,9 @@ In the plan, at least one robot should be acting, you can't all WAIT.
     def describe_obs(self, obs: EnvState):
         """ For each cube, just describe whether it's on a bin, or between which two bins, no output numerical coordinates """
         object_desp = "[Scene description]\n"  
+        if self.sort_variant != "default":
+            object_desp += f"Sort variant: {self.sort_variant}; targets may differ from the original benchmark.\n"
+            object_desp += self._format_target_pairs() + "\n"
         for cube_name in ONE_OBJ_EACH:
             object_desp += self.describe_cube_state(obs, cube_name)+"\n" 
         
@@ -441,7 +533,18 @@ In the plan, at least one robot should be acting, you can't all WAIT.
  
 
     def describe_task_context(self):
-        return SORT_TASK_CONTEXT 
+        if self.sort_variant == "default":
+            return SORT_TASK_CONTEXT
+        return f"""
+7 panels on the table, ordered left to right: panel1,...,panel7. They form a straight assembly line.
+There are 3 cubes. Current target pairs are:
+{self._format_target_pairs()}
+There are 3 robots, each with a limited reach range:
+(Alice, [panel1, panel2, panel3])
+(Bob, [panel3, panel4, panel5])
+(Chad, [panel5, panel6, panel7])
+Use panel3 and panel5 as handoff zones when a cube cannot be moved directly to its target.
+"""
     
     def get_grasp_site(self, obj_name: str = "pink_polygon") -> str:
         return f"{obj_name}_top"

@@ -1,5 +1,42 @@
 # Rope 任务调试与优化总结
 
+## 0. 场景扰动生成器更新
+
+本次新增 Rope 参数化场景扰动机制，用于评估多机器人 LLM 规划器在未见绳子姿态、目标槽位置、障碍物位置和抓取可达性变化下的鲁棒性。
+
+改动点：
+
+- `rocobench/envs/task_rope.py` 新增 `rope_variant`、`rope_goal_noise`、`rope_obstacle_noise`、`rope_pose_noise` 参数。
+- 默认 `rope_variant=default` 保持原 RoCoBench Rope 随机场景行为。
+- `easy/medium/hard` 会逐步扩大绳子初始位置范围、绕 z 轴初始角度范围、外力扰动、障碍墙位置/角度范围和 groove 目标位置范围。
+- 抓取点可达性通过 `grasp_offset` 和抓取高度范围随难度变化，迫使 planner 读取当前端点位置而不是复用固定坐标。
+- 场景描述会显式提示当前为 perturbed Rope scene，并输出当前 rope endpoints、groove endpoints、obstacle wall top sites。
+- `run_dialog.py` 已透传 Rope 扰动参数，方便直接从 Ubuntu 命令行评测。
+- 新增 `local_task_evaluator.py`，用于本地批量调用 `run_dialog.py` 并汇总成功率、超时数和平均耗时。
+
+推荐验证命令：
+
+```bash
+OLLAMA_MODEL=qwen3.5:27b uv run python run_dialog.py --task rope --comm_mode plan --num_runs 5 --tsteps 10 --seed 42 --skip_display --skip_smooth_path --fallback_first --rope_variant medium --run_name rope_medium_perturb
+OLLAMA_MODEL=qwen3.5:27b uv run python run_dialog.py --task rope --comm_mode plan --num_runs 5 --tsteps 12 --seed 42 --skip_display --skip_smooth_path --fallback_first --rope_variant hard --rope_goal_noise 0.03 --rope_obstacle_noise 0.03 --rope_pose_noise 0.03 --run_name rope_hard_perturb
+```
+
+批量统计成功率：
+
+```bash
+OLLAMA_MODEL=qwen3.5:27b uv run python local_task_evaluator.py --tasks rope --runs 5 --tsteps 10 --scene_seed 42 --variant medium
+OLLAMA_MODEL=qwen3.5:27b uv run python local_task_evaluator.py --tasks rope --runs 5 --tsteps 12 --scene_seed 42 --variant hard --rope_goal_noise 0.03 --rope_obstacle_noise 0.03 --rope_pose_noise 0.03
+```
+
+轻量检查：
+
+```bash
+uv run python -m compileall run_dialog.py local_task_evaluator.py prompting rocobench/envs
+git diff --check
+```
+
+当前已验证结果：2026-05-19，Windows 本地 `python -m compileall run_dialog.py local_task_evaluator.py prompting rocobench/envs` 通过；完整 Ubuntu/MuJoCo 仿真建议按上面的命令重新跑成功率。
+
 本文记录本次 MoveRopeTask 的完整调试过程。Rope 任务最终从 `2/5`、`3/5` 逐步提升到 `4/5 = 80%`，并将主要失败原因从 IK、碰撞、RRT timeout 收敛到“评测步数不足”。本次优化重点不是继续手调物理点，而是引入阶段化策略、fallback 候选路径、执行前验证、避障候选和恢复性 horizon。
 
 ---

@@ -1,5 +1,33 @@
 # Sort 任务调试与优化总结
 
+## 0. 场景扰动生成器更新
+
+本次新增 Sort 参数化场景扰动机制，用于验证模型和 fallback planner 是否只记住固定模板，还是能在未见布局下继续根据当前状态规划。
+
+改动点：
+
+- `rocobench/envs/task_sort.py` 新增 `sort_variant`、`sort_layout_noise`、`sort_target_mode` 参数。
+- 默认 `sort_variant=default`、`sort_target_mode=fixed`，保持原 RoCoBench Sort 行为不变。
+- `easy/medium/hard` 会按难度扰动物体初始 panel，并在 panel 内加入可控 xy 偏移。
+- `sort_target_mode=permuted` 会在每次 reset 时打乱三个物体到 `panel2/panel4/panel6` 的目标映射。
+- Sort 的场景描述、agent prompt、central plan prompt 和 fallback planner 都读取当前 `cube_to_bin`，避免继续写死 `blue_square -> panel2` 等固定答案。
+
+推荐验证命令：
+
+```bash
+OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 5 --tsteps 8 --scene_seed 42 --sort_variant medium
+OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 5 --tsteps 10 --scene_seed 42 --sort_variant hard --sort_target_mode permuted
+```
+
+轻量检查：
+
+```bash
+uv run python -m compileall run_dialog.py prompting rocobench/envs
+git diff --check
+```
+
+当前已验证结果：2026-05-19，`python -m compileall run_dialog.py prompting rocobench/envs` 通过，`git diff --check` 无空白错误；本地缺少 `uv` 和 `transforms3d`，因此未完成 MuJoCo 实例化和完整仿真评测。
+
 本文记录本次 Sort 任务从失败定位、代码修改、评测验证到泛化性分析的完整过程。Sort 任务最终在 `qwen3.5:27b` 下单轮评测达到 `1/1 = 100%`，核心改进不是单纯让大模型多生成几次，而是围绕任务状态、交接点、抓取姿态和 fallback 机制建立更稳定的执行闭环。
 
 ---

@@ -119,17 +119,20 @@ Their entire discussion and final plan are:
 
 def get_plan_prompt(env: MujocoSimEnv):
     if env.__class__.__name__ == "SortOneBlockTask":
-        return """
+        targets = getattr(env, "cube_to_bin", SORT_CUBE_TARGETS)
+        target_lines = "\n".join(f"- {cube} -> {panel}" for cube, panel in targets.items())
+        return f"""
 Find the best strategy for the current Sort Cube round based on [Scene description]. Do not show reasoning.
-Fixed targets: blue_square -> panel2, pink_polygon -> panel4, yellow_trapezoid -> panel6.
+Current targets:
+{target_lines}
 Reachability: Alice uses panel1/2/3; Bob uses panel3/4/5; Chad uses panel5/6/7.
 Relay rules:
   - If a cube is NOT yet on its target panel, move it closer. Use panel3 or panel5 as handoff zones.
   - If a cube is already on an intermediate panel (panel3 or panel5), the robot that can reach that panel AND the next target should PICK it and continue. Do NOT place it back on the same panel.
   - Check [Scene description] "(target: panelX, needs to move)" to see which cubes still need action.
   - Bob is the ONLY robot who can bridge left zone (panel3) and right zone (panel5). Bob MUST ACT when any cube is at panel3 or panel5 and needs to move further.
-  - Bob CANNOT reach panel1 or panel2. To move blue_square to panel2: Bob PICK blue_square PLACE panel3, then Alice PICK blue_square PLACE panel2.
-  - pink_polygon belongs to Bob: Bob can directly PICK pink_polygon PLACE panel4.
+  - Bob CANNOT reach panel1 or panel2. To move any cube to panel2 from the right side: Bob should relay it to panel3, then Alice should place it on panel2.
+  - To move any cube to panel6 from the left side: Bob should relay it to panel5, then Chad should place it on panel6.
 At least one robot must act each round. Output only:
 EXECUTE
 NAME Alice ACTION <PICK object PLACE panel or WAIT>
@@ -261,7 +264,7 @@ class SingleThreadPrompter:
         self.max_tokens = max_tokens
         if pack_fallback_first is not None:
             fallback_first = pack_fallback_first
-        if env.__class__.__name__ == "CabinetTask" and not debug_mode:
+        if env.__class__.__name__ in ["CabinetTask", "MakeSandwichTask"] and not debug_mode:
             fallback_first = True
         self.fallback_first = fallback_first
 
@@ -1042,33 +1045,28 @@ class SingleThreadPrompter:
         # to broad x-zone routing. This keeps the evaluator moving instead of asking
         # the LLM for a state that the deterministic relay policy can handle.
         if len(actions) == 0:
-            if "blue_square" in cube_names and not self._sort_cube_at_target(obs, "blue_square", targets["blue_square"]):
-                x = self._sort_cube_x(obs, "blue_square")
-                if x is not None:
-                    if x <= -0.20:
-                        actions.append((0, "Alice", "blue_square", "panel2"))
-                    else:
-                        actions.append((10, "Bob", "blue_square", "panel3"))
-
-            if "pink_polygon" in cube_names and not self._sort_cube_at_target(obs, "pink_polygon", targets["pink_polygon"]):
-                x = self._sort_cube_x(obs, "pink_polygon")
-                if x is not None:
-                    if -0.65 <= x <= 0.55:
-                        actions.append((1, "Bob", "pink_polygon", "panel4"))
-                    elif x < -0.65:
-                        actions.append((11, "Alice", "pink_polygon", "panel3"))
-                    else:
-                        actions.append((11, "Chad", "pink_polygon", "panel5"))
-
-            if "yellow_trapezoid" in cube_names and not self._sort_cube_at_target(obs, "yellow_trapezoid", targets["yellow_trapezoid"]):
-                x = self._sort_cube_x(obs, "yellow_trapezoid")
-                if x is not None:
-                    if x >= 0.40:
-                        actions.append((2, "Chad", "yellow_trapezoid", "panel6"))
-                    elif x >= -0.75:
-                        actions.append((12, "Bob", "yellow_trapezoid", "panel5"))
-                    else:
-                        actions.append((22, "Alice", "yellow_trapezoid", "panel3"))
+            panel_coords = getattr(self.env, "panel_coords", {})
+            for order, cube in enumerate(SORT_CUBE_ORDER):
+                if cube not in cube_names:
+                    continue
+                target_panel = targets.get(cube)
+                if target_panel is None or target_panel not in panel_coords:
+                    continue
+                if self._sort_cube_at_target(obs, cube, target_panel):
+                    continue
+                x = self._sort_cube_x(obs, cube)
+                if x is None:
+                    continue
+                target_x = float(panel_coords[target_panel][0])
+                if abs(x - target_x) < 0.45:
+                    next_panel = target_panel
+                elif x < target_x:
+                    next_panel = "panel3" if target_x <= 0 else "panel5"
+                else:
+                    next_panel = "panel5" if target_x >= 0 else "panel3"
+                active_agent = self._sort_robot_for_move(self._sort_current_panel(obs, cube), next_panel)
+                if active_agent is not None:
+                    actions.append((20 + order, active_agent, cube, next_panel))
 
         if len(actions) == 0:
             return None
@@ -1113,6 +1111,11 @@ class SingleThreadPrompter:
                 return agent_name
         return None
 
+    def _sandwich_gripper_empty(self, obs: EnvState, agent_name: str) -> bool:
+        robot_name = self.env.robot_name_map_inv[agent_name]
+        contacts = getattr(getattr(obs, robot_name), "contacts", [])
+        return len(contacts) == 0
+
     def _sandwich_robot_can_reach_item(self, obs: EnvState, agent_name: str, item: str) -> bool:
         robot_name = self.env.robot_name_map_inv[agent_name]
         if item not in obs.objects:
@@ -1130,11 +1133,33 @@ class SingleThreadPrompter:
         lines = ["EXECUTE"]
         holder = self._sandwich_holding(obs, next_item)
         if holder is not None:
+            actions = {agent_name: "WAIT" for agent_name in ["Chad", "Dave"]}
+            actions[holder] = f"PUT {next_item} {target}"
+            recipe = list(getattr(self.env, "recipe_order", []))
+            try:
+                next_idx = recipe.index(next_item) + 1
+            except ValueError:
+                next_idx = len(recipe)
+            if next_idx < len(recipe):
+                prep_item = recipe[next_idx]
+                if (
+                    self._sandwich_holding(obs, prep_item) is None
+                    and not self._sandwich_item_on_target(
+                        obs,
+                        prep_item,
+                        "cutting_board" if next_idx == 0 else recipe[next_idx - 1],
+                    )
+                ):
+                    for agent_name in ["Chad", "Dave"]:
+                        if (
+                            agent_name != holder
+                            and self._sandwich_gripper_empty(obs, agent_name)
+                            and self._sandwich_robot_can_reach_item(obs, agent_name, prep_item)
+                        ):
+                            actions[agent_name] = f"PICK {prep_item}"
+                            break
             for agent_name in ["Chad", "Dave"]:
-                if agent_name == holder:
-                    lines.append(f"NAME {agent_name} ACTION PUT {next_item} {target}")
-                else:
-                    lines.append(f"NAME {agent_name} ACTION WAIT")
+                lines.append(f"NAME {agent_name} ACTION {actions[agent_name]}")
             return "\n".join(lines)
 
         active_agent = None

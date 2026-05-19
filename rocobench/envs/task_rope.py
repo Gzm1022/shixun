@@ -30,6 +30,61 @@ OBSTACLE_RANGE = (
     np.array([-0.15, 0.5, 0.2]),
     np.array([0, 0.5, 0.3]),
 )
+GROOVE_DEFAULT_POS = np.array([0.6, 0.5, 0.16])
+ROPE_VARIANT_CONFIGS = {
+    "default": dict(
+        rope_low=np.array([-1.2, 0.6, 0.2]),
+        rope_high=np.array([-1.3, 0.45, 0.2]),
+        angle=(-np.pi / 6, np.pi / 6),
+        force=(1.0, 1.4),
+        obstacle_low=np.array([-0.15, 0.5, 0.2]),
+        obstacle_high=np.array([0.0, 0.5, 0.3]),
+        obstacle_angle=(-np.pi / 5, np.pi / 5),
+        groove_low=GROOVE_DEFAULT_POS,
+        groove_high=GROOVE_DEFAULT_POS,
+        grasp_offset=0.06,
+        grasp_z=(0.32, 0.46),
+    ),
+    "easy": dict(
+        rope_low=np.array([-1.20, 0.55, 0.2]),
+        rope_high=np.array([-1.08, 0.45, 0.2]),
+        angle=(-np.pi / 9, np.pi / 9),
+        force=(1.0, 1.2),
+        obstacle_low=np.array([-0.12, 0.45, 0.2]),
+        obstacle_high=np.array([0.08, 0.55, 0.28]),
+        obstacle_angle=(-np.pi / 8, np.pi / 8),
+        groove_low=GROOVE_DEFAULT_POS + np.array([-0.04, -0.04, 0.0]),
+        groove_high=GROOVE_DEFAULT_POS + np.array([0.04, 0.04, 0.0]),
+        grasp_offset=0.06,
+        grasp_z=(0.32, 0.46),
+    ),
+    "medium": dict(
+        rope_low=np.array([-1.28, 0.68, 0.2]),
+        rope_high=np.array([-1.02, 0.35, 0.2]),
+        angle=(-np.pi / 4, np.pi / 4),
+        force=(1.0, 1.5),
+        obstacle_low=np.array([-0.25, 0.35, 0.2]),
+        obstacle_high=np.array([0.15, 0.65, 0.32]),
+        obstacle_angle=(-np.pi / 4, np.pi / 4),
+        groove_low=GROOVE_DEFAULT_POS + np.array([-0.08, -0.08, 0.0]),
+        groove_high=GROOVE_DEFAULT_POS + np.array([0.08, 0.08, 0.0]),
+        grasp_offset=0.08,
+        grasp_z=(0.34, 0.48),
+    ),
+    "hard": dict(
+        rope_low=np.array([-1.35, 0.78, 0.2]),
+        rope_high=np.array([-0.95, 0.25, 0.2]),
+        angle=(-np.pi / 2, np.pi / 2),
+        force=(1.1, 1.7),
+        obstacle_low=np.array([-0.35, 0.25, 0.2]),
+        obstacle_high=np.array([0.25, 0.75, 0.34]),
+        obstacle_angle=(-np.pi / 3, np.pi / 3),
+        groove_low=GROOVE_DEFAULT_POS + np.array([-0.15, -0.15, 0.0]),
+        groove_high=GROOVE_DEFAULT_POS + np.array([0.15, 0.15, 0.0]),
+        grasp_offset=0.10,
+        grasp_z=(0.36, 0.50),
+    ),
+}
 
 
 OBSTACLE_CORNER_NAMES = [
@@ -72,6 +127,10 @@ class MoveRopeTask(MujocoSimEnv):
         self,
         filepath: str = "rocobench/envs/task_rope.xml",
         one_obj_each: bool = False,
+        rope_variant: str = "default",
+        rope_goal_noise: float = 0.0,
+        rope_obstacle_noise: float = 0.0,
+        rope_pose_noise: float = 0.0,
         **kwargs,
     ):    
         self.robot_names = ["ur5e_robotiq", "panda"] 
@@ -84,6 +143,11 @@ class MoveRopeTask(MujocoSimEnv):
             "Bob": "panda", 
         }
         self.robots = dict()  
+        self.rope_variant = rope_variant
+        self.rope_goal_noise = rope_goal_noise
+        self.rope_obstacle_noise = rope_obstacle_noise
+        self.rope_pose_noise = rope_pose_noise
+        self.rope_variant_config = ROPE_VARIANT_CONFIGS.get(rope_variant, ROPE_VARIANT_CONFIGS["default"])
 
         super(MoveRopeTask, self).__init__(
             filepath=filepath, 
@@ -117,8 +181,7 @@ class MoveRopeTask(MujocoSimEnv):
          
         self.align_threshold = 0.2
         self.groove_pos = dict()
-        for side in ["left", "right"]:
-            self.groove_pos[f"groove_{side}_end"] = self.physics.data.site(f"groove_{side}_end").xpos.copy()
+        self._refresh_rope_sites()
         self.rope_length = np.linalg.norm(
             self.physics.data.body(ROPE_FRONT_BODY).xpos - self.physics.data.body(ROPE_BACK_BODY).xpos
             )
@@ -126,6 +189,18 @@ class MoveRopeTask(MujocoSimEnv):
     @property
     def waypoint_std_threshold(self):
         return 0.3
+
+    def _variant_config(self) -> Dict[str, Any]:
+        return ROPE_VARIANT_CONFIGS.get(self.rope_variant, ROPE_VARIANT_CONFIGS["default"])
+
+    def _refresh_rope_sites(self) -> None:
+        self.groove_pos = {
+            f"groove_{side}_end": self.physics.data.site(f"groove_{side}_end").xpos.copy()
+            for side in ["left", "right"]
+        }
+
+    def _sample_vec(self, low: np.ndarray, high: np.ndarray) -> np.ndarray:
+        return self.random_state.uniform(low=np.minimum(low, high), high=np.maximum(low, high))
 
     def get_rope_grasp_target_pos(self, target_name: str) -> Optional[np.ndarray]:
         """Return a conservative grasp target near a rope end.
@@ -148,9 +223,11 @@ class MoveRopeTask(MujocoSimEnv):
 
         direction = other - pos
         norm = np.linalg.norm(direction[:2])
+        config = self._variant_config()
         if norm > 1e-6:
-            pos[:2] += 0.06 * direction[:2] / norm
-        pos[2] = min(max(float(pos[2]) + 0.10, 0.32), 0.46)
+            pos[:2] += float(config["grasp_offset"]) * direction[:2] / norm
+        z_low, z_high = config["grasp_z"]
+        pos[2] = min(max(float(pos[2]) + 0.10, z_low), z_high)
         return pos
 
     def get_target_pos(self, agent_name, target_name) -> Optional[np.ndarray]: 
@@ -260,15 +337,17 @@ class MoveRopeTask(MujocoSimEnv):
             raise NotImplementedError
     
     def sample_initial_scene(self): 
-        # sample locations of the cabinet
-        low, high = ROPE_INIT_RANGE
-        new_pos = self.random_state.uniform(low, high) 
-        new_angle = self.random_state.uniform(low=-np.pi/6, high=np.pi/6)
+        config = self._variant_config()
+        pose_noise = self.rope_pose_noise
+        rope_low = config["rope_low"] - np.array([pose_noise, pose_noise, 0.0])
+        rope_high = config["rope_high"] + np.array([pose_noise, pose_noise, 0.0])
+        new_pos = self._sample_vec(rope_low, rope_high)
+        new_angle = self.random_state.uniform(low=config["angle"][0], high=config["angle"][1])
         new_quat = Quaternion(
             axis=[0,0,1], angle=new_angle
             ) 
         new_quat = np.array([new_quat.w, new_quat.x, new_quat.y, new_quat.z]) 
-        if abs(new_angle) > 0.3:
+        if self.rope_variant == "default" and abs(new_angle) > 0.3:
             new_pos[0] = -1.1
         self.reset_body_pose(
             body_name="rope",
@@ -283,10 +362,16 @@ class MoveRopeTask(MujocoSimEnv):
         # apply random force to init the rope: 
         rope_body = self.random_state.choice(range(8, 16))
         rope_body = f'CB{rope_body}'
-        self.physics.named.data.xfrc_applied[[rope_body], 2] = self.random_state.uniform(1, 1.4, size=1).reshape((1, 1))
-        wall_pos = self.random_state.uniform(low=OBSTACLE_RANGE[0], high=OBSTACLE_RANGE[1])
+        self.physics.named.data.xfrc_applied[[rope_body], 2] = self.random_state.uniform(
+            config["force"][0], config["force"][1], size=1
+        ).reshape((1, 1))
+        obstacle_noise = self.rope_obstacle_noise
+        wall_pos = self._sample_vec(
+            config["obstacle_low"] - np.array([obstacle_noise, obstacle_noise, 0.0]),
+            config["obstacle_high"] + np.array([obstacle_noise, obstacle_noise, 0.0]),
+        )
         new_quat = Quaternion(
-            axis=[0,0,1], angle=self.random_state.uniform(low=-np.pi/5, high=np.pi/5)
+            axis=[0,0,1], angle=self.random_state.uniform(low=config["obstacle_angle"][0], high=config["obstacle_angle"][1])
             ) 
         new_quat = np.array([new_quat.w, new_quat.x, new_quat.y, new_quat.z]) 
         
@@ -294,6 +379,16 @@ class MoveRopeTask(MujocoSimEnv):
             body_name="obstacle_wall",
             pos=wall_pos,
             quat=new_quat, # no resample
+        )
+
+        goal_noise = self.rope_goal_noise
+        groove_pos = self._sample_vec(
+            config["groove_low"] - np.array([goal_noise, goal_noise, 0.0]),
+            config["groove_high"] + np.array([goal_noise, goal_noise, 0.0]),
+        )
+        self.reset_body_pose(
+            body_name="groove",
+            pos=groove_pos,
         )
              
         self.physics.forward()
@@ -308,6 +403,7 @@ class MoveRopeTask(MujocoSimEnv):
         
         self.physics.forward()
         self.physics.step(50)
+        self._refresh_rope_sites()
     
     def get_allowed_collision_pairs(self) -> List[Tuple[int, int]]:
         rope_ids = self.get_all_body_ids("rope")
@@ -350,6 +446,11 @@ class MoveRopeTask(MujocoSimEnv):
  
     def describe_obs(self, obs: EnvState):
         object_desp =  "[Scene description]\n"
+        if self.rope_variant != "default":
+            object_desp += (
+                f"Rope variant: {self.rope_variant}; rope pose, groove target, "
+                "obstacle wall, and grasp offsets may differ from the original benchmark.\n"
+            )
         table_height = self.physics.data.body("table_top").xpos[2] + 0.15
         object_desp += f"robots must move lower than 0.55 but higher than table height {table_height:.2f}\n"
         for side in ["left", "right"]:
@@ -446,6 +547,11 @@ End your response by either: 1) output PROCEED, if the plans require further dis
 
     def describe_task_context(self):
         context = ROPE_TASK_CONTEXT
+        if self.rope_variant != "default":
+            context += (
+                "\nThis is a perturbed Rope scene. Read the current Scene description: "
+                "rope endpoints, groove endpoints, and obstacle wall positions can change each reset."
+            )
         return context
 
     def get_contact(self):

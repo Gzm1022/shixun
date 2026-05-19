@@ -1,5 +1,40 @@
 # Sweep 实训方案
 
+## 0. 场景扰动生成器更新
+
+本次新增 Sweep 参数化场景扰动机制，用于评估模型在未见垃圾分布、摆放密度和清扫目标区域变化下的鲁棒性。
+
+改动点：
+
+- `rocobench/envs/task_sweep.py` 新增 `sweep_variant`、`sweep_cube_noise`、`sweep_target_noise` 参数。
+- 默认 `sweep_variant=default` 保持原 RoCoBench Sweep 行为。
+- `easy/medium/hard` 会逐步扩大 cube 的 xy 分布范围、改变垃圾密度，并扰动 `trash_bin` 目标位置。
+- `hard` 会生成更聚集的垃圾分布，测试 Bob 扫动和 Alice dustpan 对位是否能处理密集/相邻目标。
+- 场景描述会输出当前 `trash_bin` 目标位置，并提示当前为 perturbed Sweep scene。
+- `run_dialog.py` 已透传 Sweep 扰动参数。
+- `local_task_evaluator.py` 已支持 Sweep 批量评测，能统计成功率、超时数和平均耗时。
+
+推荐验证命令：
+
+```bash
+OLLAMA_MODEL=qwen3.5:27b uv run python run_dialog.py --task sweep --comm_mode plan --num_runs 5 --tsteps 10 --seed 42 --skip_display --skip_smooth_path --fallback_first --sweep_variant medium --run_name sweep_medium_perturb
+OLLAMA_MODEL=qwen3.5:27b uv run python run_dialog.py --task sweep --comm_mode plan --num_runs 5 --tsteps 12 --seed 42 --skip_display --skip_smooth_path --fallback_first --sweep_variant hard --sweep_cube_noise 0.03 --sweep_target_noise 0.03 --run_name sweep_hard_perturb
+```
+
+批量统计成功率：
+
+```bash
+OLLAMA_MODEL=qwen3.5:27b uv run python local_task_evaluator.py --tasks sweep --runs 5 --tsteps 10 --scene_seed 42 --variant medium
+OLLAMA_MODEL=qwen3.5:27b uv run python local_task_evaluator.py --tasks sweep --runs 5 --tsteps 12 --scene_seed 42 --variant hard --sweep_cube_noise 0.03 --sweep_target_noise 0.03
+```
+
+轻量检查：
+
+```bash
+uv run python -m compileall run_dialog.py local_task_evaluator.py prompting rocobench/envs
+git diff --check
+```
+
 本项目基于开源 RoCo / RoCoBench 框架完成 Sweep 多机器人协同清扫任务。原框架使用大语言模型生成多机器人协作动作，通过文本解析器转换为机器人动作，再由 MuJoCo 环境、反馈模块和 RRT 路径规划器验证并执行。
 
 ## 任务理解
