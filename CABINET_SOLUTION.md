@@ -2,6 +2,51 @@
 
 本项目基于开源 RoCo / RoCoBench 框架完成 Cabinet 多机器人协同柜门操作任务。原框架使用大语言模型生成多机器人协作动作，通过文本解析器转换为机器人动作，再由 MuJoCo 环境、反馈模块和 RRT 路径规划器验证并执行。
 
+## 2026-05-19 失败分析与修复
+
+分析目录：
+
+- `output/run_20260519_021721/tasks/02_cabinet`：5 个 run 中仅 `run_2` 成功，成功率 1/5。
+- `output/run_20260519_034509/tasks/02_cabinet`：5 个 run 中仅 `run_2` 成功，成功率 1/5，且有 2 个超时。
+
+共同失败模式不是开门顺序错误。多数失败 run 都按相同的前 4 步执行：Alice/Bob 抓左右门把手，Alice/Bob 打开门，Chad 搬 `mug`，Chad 搬 `cup`。真正的问题在 `PICK cup PLACE cup_coaster` 执行后，`cup` 没有稳定落到 `cup_coaster`，而是偏到桌面边缘或低处，例如历史日志中出现过 `(0.8, 0.3, 0.2)`、`(0.5, 1.1, -0.4)`、`(-0.2, 1.1, -0.4)`。之后任务尚未完成，模型又经常输出全员 `WAIT`，被环境反馈拒绝；或者继续让 Chad 抓 `cup`，但 cup 已经不可达，触发 `Out of reach`，最终耗尽步数或超时。
+
+本次修复面向机制，不针对固定 seed 或固定坐标：
+
+1. `prompting/plan_prompter.py`
+   - Cabinet 默认先尝试确定性 fallback，按当前门状态、物体是否在杯垫上生成动作，减少模型在固定流程中反复全员 `WAIT` 或输出长推理导致解析失败。
+   - fallback 根据 `cabinet_pos` 动态选择门机器人和取物机器人，不写死当前左侧柜场景；当前官方场景仍由环境限制在左侧，但逻辑保留右侧兼容。
+   - Cabinet prompt 改为严格要求只输出 `EXECUTE` block，并明确“物体未完成时不能全员 WAIT”。
+
+2. `prompting/parser.py`
+   - 对 Cabinet 的 `PICK mug/cup PLACE coaster` 增加专用搬运路径：从柜内抓取后先抬高，再水平移动到 coaster 上方，再下降释放。
+   - 路径由当前抓取点、目标 coaster 和 cabinet 高度计算，避免低空直线横移擦碰柜体、桌面或导致杯子释放不稳。
+   - Cabinet 放置后不再强制回 home，避免释放瞬间或释放后回撤动作把杯子再次带偏。
+
+3. `rocobench/policy.py`
+   - `policy.py` 是执行层：把 parser 生成的末端目标转换为 IK、RRT 路径、夹爪/吸盘控制和 MuJoCo weld 开关。
+   - 修复 release 计划的状态不一致：如果释放阶段发现对应物体的 weld 已经 active，就把该物体作为 in-hand 物体加入规划，让 RRT/碰撞检查按“机器人手里拿着 cup/mug”的真实状态规划。
+
+验证结果：
+
+```bash
+/root/miniconda3/envs/roco/bin/python -m compileall run_dialog.py prompting rocobench/envs rocobench/policy.py
+```
+
+结果：通过。
+
+按用户给定 evaluator 入口直接运行时，本机环境在任务初始化前触发 MuJoCo 渲染错误 `gladLoadGL error`，没有进入任务逻辑。仅增加渲染后端变量 `MUJOCO_GL=egl` 后，其他参数保持一致：
+
+结果：新增统计的 `run_1`、`run_2`、`run_3` 全部 `steps3_success_True.json`，evaluator 汇总 `3/3 (100.0%)`，`Timeout Count: 0/3`，`Average Steps: 3.00`，总耗时约 1252.19 秒。因为 `output/single_task_gpu/cabinet/run_0` 已有旧失败结果，本次 evaluator 从 `run_1` 继续追加；在当前 `run_dialog.py` 中每个 run 内部使用 `run_id` 作为实际场景 seed。
+
+另外在干净调试目录中直接运行：
+
+```bash
+MUJOCO_GL=egl xvfb-run -a /root/miniconda3/envs/roco/bin/python run_dialog.py --task cabinet --run_name runs --data_dir output/cabinet_debug_after_patch_egl2 --start_id -1 --num_runs 3 --skip_display --tsteps 10 --seed 0 --run_timeout 600
+```
+
+结果：`run_0`、`run_1`、`run_2` 均在 step 3 成功。
+
 ## 任务理解
 
 Cabinet 任务中，三个机器人需要从柜子中取出杯子并放置到指定位置：

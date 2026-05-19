@@ -39,6 +39,7 @@ class PlannedPathPolicy:
         self.robot_names = robots.keys()
         self.robots = robots
         physics = physics.copy(share_model=True)
+        self.augment_release_plan_inhand(physics, path_plan)
         self.graspable_object_names = graspable_object_names
         self.rrt_planner = MultiArmRRT(
             physics=physics,
@@ -70,6 +71,28 @@ class PlannedPathPolicy:
         self.skip_smooth_path = skip_smooth_path # skip smoothing the path, useful for debugging
         self.plan_splitted = plan_splitted # if True, the plan is splitted into two parts, one for each robot
         self.timeout = timeout # timeout for each planning step, in number of planning steps
+
+    def augment_release_plan_inhand(self, physics, path_plan: LLMPathPlan):
+        """Treat an actively welded object as in-hand while planning its release."""
+        for robot_name, obj in path_plan.tograsp.items():
+            if obj is None or path_plan.inhand.get(robot_name) is not None:
+                continue
+            obj_name, obj_site_name, grasp_val = obj
+            if int(grasp_val) != 0:
+                continue
+            weld_body_name = self.robots[robot_name].weld_body_name
+            weld_name = f"{obj_site_name}_{weld_body_name}"
+            try:
+                weld_active = bool(physics.named.model.eq_active[weld_name])
+                physics.named.data.qpos._convert_key(f"{obj_name}_joint")
+            except Exception:
+                continue
+            if weld_active:
+                path_plan.inhand[robot_name] = (
+                    obj_name,
+                    obj_site_name,
+                    f"{obj_name}_joint",
+                )
 
 
     def ik_ee_poses_to_qpos(self, physics, ee_poses: Dict[str, Pose]) -> Dict[str, np.ndarray]:
@@ -457,5 +480,4 @@ class PlannedPathPolicy:
             assert len(self.action_buffer) != 0, "action buffer is empty, cal plan_qpos first"
         action = self.action_buffer[self.action_idx]
         self.action_idx += 1
-        return action 
- 
+        return action

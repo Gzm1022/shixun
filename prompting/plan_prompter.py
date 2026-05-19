@@ -82,6 +82,22 @@ DEFAULT_USER_PROMPT = "Generate the next robot plan. Output the required EXECUTE
 
 
 def get_chat_prompt(env: MujocoSimEnv):
+    if env.__class__.__name__ == "CabinetTask":
+        return """
+Output only the next executable Cabinet plan. Do not show reasoning.
+Use the current scene state:
+- Closed door with gripper not holding handle: PICK that door handle.
+- Closed door with gripper holding handle: OPEN that door handle.
+- Open door: the door robot WAITs to hold it open.
+- Once both doors are open, the item robot must PICK the first object not on its coaster and PLACE it on the matching coaster.
+- If mug is on its coaster and cup is not, the next acting item must be PICK cup PLACE cup_coaster.
+- Never output all WAIT while either mug or cup is not on its coaster.
+Output only:
+EXECUTE
+NAME <robot> ACTION <action>
+NAME <robot> ACTION <action>
+NAME <robot> ACTION <action>
+        """
     robot_names = env.get_sim_robots().keys()
     talk_order_str = ",".join([f"[{name}]" for name in robot_names])
     chat_prompt = f"""
@@ -155,19 +171,18 @@ NAME Bob ACTION <PICK item PATH <4 coords> | PLACE item slot PATH <4 coords> | W
     if env.__class__.__name__ == "CabinetTask":
         return """
 Coordinate 3 robots to take mug and cup from cabinet and place on correct coasters. Do not show reasoning.
-Cabinet is on the LEFT: Alice reaches left_door_handle/mug/cup; Bob reaches right_door_handle ONLY; Chad reaches right_door_handle/mug/cup.
-Phase 1 - Open both doors simultaneously:
-  Alice: PICK left_door_handle, then OPEN left_door_handle, then WAIT to hold it open.
-  Bob: PICK right_door_handle, then OPEN right_door_handle, then WAIT to hold it open.
-Phase 2 - After BOTH doors are open, Chad picks and places items:
-  PICK mug PLACE mug_coaster (first), then PICK cup PLACE cup_coaster.
+Use the reachability stated by the current scene and agent capabilities; do not assume a fixed cabinet side.
+Phase 1 - Open both doors:
+  Door handlers PICK their reachable handle, then OPEN it, then WAIT to hold it open.
+Phase 2 - After BOTH doors are open, the free item robot picks and places items:
+  PICK mug PLACE mug_coaster first if mug is not on its coaster; otherwise PICK cup PLACE cup_coaster.
   PICK+PLACE is one single ACTION - always output both together for mug/cup.
-Rules: Never PICK mug/cup until BOTH doors are open. Never have all 3 robots WAIT at the same time.
+Rules: Never PICK mug/cup until BOTH doors are open. Never have all 3 robots WAIT while either object is not on its coaster.
 Output only:
 EXECUTE
-NAME Alice ACTION <PICK left_door_handle | OPEN left_door_handle | WAIT>
-NAME Bob ACTION <PICK right_door_handle | OPEN right_door_handle | WAIT>
-NAME Chad ACTION <PICK mug PLACE mug_coaster | PICK cup PLACE cup_coaster | WAIT>
+NAME Alice ACTION <PICK handle | OPEN handle | PICK mug PLACE mug_coaster | PICK cup PLACE cup_coaster | WAIT>
+NAME Bob ACTION <PICK handle | OPEN handle | PICK mug PLACE mug_coaster | PICK cup PLACE cup_coaster | WAIT>
+NAME Chad ACTION <PICK handle | OPEN handle | PICK mug PLACE mug_coaster | PICK cup PLACE cup_coaster | WAIT>
         """
     return """
 Find the best strategy to coordinate the robots, but do not show your reasoning. Propose a plan of **exactly** one action per robot.
@@ -216,6 +231,8 @@ class SingleThreadPrompter:
         self.max_tokens = max_tokens
         if pack_fallback_first is not None:
             fallback_first = pack_fallback_first
+        if env.__class__.__name__ == "CabinetTask" and not debug_mode:
+            fallback_first = True
         self.fallback_first = fallback_first
 
         self.round_history = [] # [obs_t, action_t] but only if action_t got executed
@@ -1170,22 +1187,38 @@ class SingleThreadPrompter:
 
         alice_raw = getattr(alice_state, "contacts", [])
         bob_raw = getattr(bob_state, "contacts", [])
+        chad_raw = getattr(chad_state, "contacts", [])
+        states = {
+            "Alice": alice_raw,
+            "Bob": bob_raw,
+            "Chad": chad_raw,
+        }
+        actions = {name: "WAIT" for name in states}
 
-        # Alice handles LEFT door
-        if left_door_open:
-            alice_action = "WAIT"
-        elif "left_door_handle" in alice_raw:
-            alice_action = "OPEN left_door_handle"
+        if self.env.cabinet_pos[0] < 0:
+            door_assignments = {
+                "Alice": "left_door_handle",
+                "Bob": "right_door_handle",
+            }
+            item_agent = "Chad"
         else:
-            alice_action = "PICK left_door_handle"
+            door_assignments = {
+                "Chad": "left_door_handle",
+                "Alice": "right_door_handle",
+            }
+            item_agent = "Bob"
 
-        # Bob handles RIGHT door only
-        if right_door_open:
-            bob_action = "WAIT"
-        elif "right_door_handle" in bob_raw:
-            bob_action = "OPEN right_door_handle"
-        else:
-            bob_action = "PICK right_door_handle"
+        door_open = {
+            "left_door_handle": left_door_open,
+            "right_door_handle": right_door_open,
+        }
+        for agent_name, handle in door_assignments.items():
+            if door_open[handle]:
+                actions[agent_name] = "WAIT"
+            elif handle in states[agent_name]:
+                actions[agent_name] = f"OPEN {handle}"
+            else:
+                actions[agent_name] = f"PICK {handle}"
 
         # Item states
         mug_pos = self.env.physics.data.body("mug").xpos
@@ -1193,22 +1226,17 @@ class SingleThreadPrompter:
         mug_on_coaster = np.linalg.norm(mug_pos - self.env.coaster_pos["mug_coaster"]) < 0.25
         cup_on_coaster = np.linalg.norm(cup_pos - self.env.coaster_pos["cup_coaster"]) < 0.25
 
-        # Chad picks items only when both doors are open
         if left_door_open and right_door_open:
             if not mug_on_coaster:
-                chad_action = "PICK mug PLACE mug_coaster"
+                actions[item_agent] = "PICK mug PLACE mug_coaster"
             elif not cup_on_coaster:
-                chad_action = "PICK cup PLACE cup_coaster"
-            else:
-                chad_action = "WAIT"
-        else:
-            chad_action = "WAIT"
+                actions[item_agent] = "PICK cup PLACE cup_coaster"
 
         return (
             f"EXECUTE\n"
-            f"NAME Alice ACTION {alice_action}\n"
-            f"NAME Bob ACTION {bob_action}\n"
-            f"NAME Chad ACTION {chad_action}"
+            f"NAME Alice ACTION {actions['Alice']}\n"
+            f"NAME Bob ACTION {actions['Bob']}\n"
+            f"NAME Chad ACTION {actions['Chad']}"
         )
 
     def build_fallback_response(self, obs: EnvState) -> Optional[str]:

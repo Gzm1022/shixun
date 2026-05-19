@@ -437,12 +437,21 @@ class LLMResponseParser:
         # update the target quat!
         place_target_pose[3:] = pick_target_pose[3:]
 
-        place_waypoints = self.add_direct_waypoints(
-            ee_start=pick_target_pose,
-            ee_target=place_target_pose,
-        )
         tograsp = pick_plan[0]['tograsp']
         obj_name, obj_site = tograsp[0], tograsp[1]
+
+        if self.env.__class__.__name__ == "CabinetTask" and obj_name in ["mug", "cup"]:
+            place_waypoints = self.add_cabinet_transfer_waypoints(
+                ee_start=pick_target_pose,
+                ee_target=place_target_pose,
+            )
+            return_home = False
+        else:
+            place_waypoints = self.add_direct_waypoints(
+                ee_start=pick_target_pose,
+                ee_target=place_target_pose,
+            )
+            return_home = True
         
         place_plan = dict(
             robot_name=agent_name,
@@ -451,10 +460,8 @@ class LLMResponseParser:
             tograsp=(obj_name, obj_site, 0),
             inhand=None, # NOTE: tmp issue here, cannot set inhand to (obj_name, obj_site, joint_name) when planning ahead
             action_strs=action_desp,
-            return_home=True
+            return_home=return_home
         )
-
-        current_pose = np.array(robot_state.ee_pose)
  
         return True, "parse success", [pick_plan[0], place_plan] #, move_plan]
 
@@ -734,6 +741,71 @@ class LLMResponseParser:
             waypoints.append(top_pose)
         else:
             waypoints.append(ee_target)
+        return waypoints
+
+    def add_cabinet_transfer_waypoints(self, ee_target, ee_start) -> List[np.ndarray]:
+        """Lift objects out of the cabinet before moving laterally to a coaster."""
+        num_waypoints = self.direct_waypoints + 1
+        if num_waypoints <= 0:
+            return []
+
+        start_pos = np.asarray(ee_start[:3], dtype=float)
+        target_pos = np.asarray(ee_target[:3], dtype=float)
+        target_quat = np.asarray(ee_target[3:], dtype=float)
+
+        safe_z = max(float(start_pos[2]), float(target_pos[2])) + 0.20
+        try:
+            cabinet_z = float(self.env.physics.data.body("cabinet").xpos[2])
+            safe_z = max(safe_z, cabinet_z + 0.16)
+        except Exception:
+            pass
+        safe_z = min(max(safe_z, 0.55), 0.85)
+
+        lift_pos = start_pos.copy()
+        lift_pos[2] = safe_z
+        above_target = target_pos.copy()
+        above_target[2] = safe_z
+        pre_place = target_pos.copy()
+        pre_place[2] = max(target_pos[2] + 0.10, min(safe_z, 0.58))
+
+        anchors = [start_pos, lift_pos, above_target, pre_place, target_pos]
+        return self.sample_pose_polyline(anchors, target_quat, num_waypoints)
+
+    def sample_pose_polyline(
+        self,
+        anchors: List[np.ndarray],
+        quat: np.ndarray,
+        num_waypoints: int,
+    ) -> List[np.ndarray]:
+        anchors = [np.asarray(anchor, dtype=float) for anchor in anchors]
+        deduped = [anchors[0]]
+        for anchor in anchors[1:]:
+            if np.linalg.norm(anchor - deduped[-1]) > 1e-6:
+                deduped.append(anchor)
+        anchors = deduped
+
+        if len(anchors) == 1:
+            return [np.concatenate([anchors[0], quat])] * num_waypoints
+
+        seg_lengths = np.array([
+            np.linalg.norm(anchors[i + 1] - anchors[i])
+            for i in range(len(anchors) - 1)
+        ])
+        total = float(seg_lengths.sum())
+        if total <= 1e-6:
+            return [np.concatenate([anchors[-1], quat])] * num_waypoints
+
+        waypoints = []
+        samples = np.linspace(total / num_waypoints, total, num_waypoints)
+        cumulative = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+        for sample in samples:
+            seg_idx = int(np.searchsorted(cumulative, sample, side="right") - 1)
+            seg_idx = min(seg_idx, len(seg_lengths) - 1)
+            seg_start = cumulative[seg_idx]
+            seg_len = seg_lengths[seg_idx]
+            ratio = 1.0 if seg_len <= 1e-6 else (sample - seg_start) / seg_len
+            pos = anchors[seg_idx] + (anchors[seg_idx + 1] - anchors[seg_idx]) * ratio
+            waypoints.append(np.concatenate([pos, quat]))
         return waypoints
     
     def add_planned_waypoints(self, ee_target, path_pts, ee_start) -> List[np.ndarray]:
