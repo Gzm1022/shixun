@@ -303,7 +303,13 @@ class LLMResponseParser:
             # special case 
             site_name = obj_name 
             pick_pos = self.env.get_target_pos(agent_name, site_name)
-            pick_quat = np.array([1,0,0,0])
+            if pick_pos is None:
+                return False, f"Rope target {site_name} does not exist in the environment.", []
+            pick_pos = pick_pos.copy()
+            # Rope endpoint IK is brittle. Keep the current gripper orientation
+            # and use the env-provided inward-offset target instead of forcing
+            # an absolute quaternion that may be unreachable for Panda/Bob.
+            pick_quat = robot_state.ee_xquat.copy()
         else:
             if obj_name not in obs.objects: 
                 return False, f"Object {obj_name} does not exist in the environment.", []

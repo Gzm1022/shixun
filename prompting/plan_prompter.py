@@ -999,13 +999,14 @@ class SingleThreadPrompter:
             s, t = np.asarray(start[:3], dtype=float), np.asarray(target[:3], dtype=float)
             safe_z = min(max(float(s[2]), 0.38), 0.50)
             p0 = s.copy(); p0[2] = safe_z
-            t_low = t.copy(); t_low[2] = min(max(float(t[2]) + 0.05, 0.28), 0.48)
+            t_low = t.copy(); t_low[2] = min(max(float(t[2]), 0.32), 0.46)
             pts = [p0 + (t_low - p0) * (i + 1) / 4 for i in range(4)]
             return pts
 
         def _lift_place(start, target, lift_z=0.60):
             """4-waypoint path that lifts to lift_z then descends to target."""
             s, t = np.asarray(start[:3], dtype=float), np.asarray(target[:3], dtype=float)
+            lift_z = min(max(float(lift_z), 0.56), 0.64)
             p1 = s.copy(); p1[2] = lift_z
             t_arr = t.copy(); t_arr[2] = max(float(t[2]), 0.42)
             p2 = p1 + (t_arr - p1) * 0.33; p2[2] = lift_z
@@ -1013,10 +1014,8 @@ class SingleThreadPrompter:
             return [p1, p2, p3, t_arr]
 
         if not alice_holding and not bob_holding:
-            rope_front = np.asarray(self.env.physics.data.body(ROPE_FRONT_BODY).xpos[:3], dtype=float)
-            rope_back = np.asarray(self.env.physics.data.body(ROPE_BACK_BODY).xpos[:3], dtype=float)
-            a_t = rope_front.copy(); a_t[2] += 0.08
-            b_t = rope_back.copy(); b_t[2] += 0.08
+            a_t = np.asarray(self.env.get_target_pos("Alice", "rope_front_end")[:3], dtype=float)
+            b_t = np.asarray(self.env.get_target_pos("Bob", "rope_back_end")[:3], dtype=float)
             # No x-clamping for PICK: low-z approach (z<=0.50) is safe; x clamping only needed at z>0.55 (PUT phase)
             a_path = _low_approach(alice_pos, a_t)
             b_path = _low_approach(bob_pos, b_t)
@@ -1030,8 +1029,8 @@ class SingleThreadPrompter:
             groove_right = np.asarray(self.env.groove_pos.get("groove_right_end", [1.0, 0.50, 0.43]), dtype=float)
             groove_left = np.asarray(self.env.groove_pos.get("groove_left_end", [0.20, 0.50, 0.43]), dtype=float)
             obstacle_tops = [self.env.physics.data.site(n).xpos[2] for n in ["obstacle_wall_front_top", "obstacle_wall_back_top"] if self.env.physics.model.site(n).id >= 0]
-            lift_z = (max(obstacle_tops) + 0.12) if obstacle_tops else 0.60
-            lift_z = min(lift_z, 0.72)
+            lift_z = (max(obstacle_tops) + 0.10) if obstacle_tops else 0.60
+            lift_z = min(lift_z, 0.64)
             # Alice (rope_front, starts left at x≈-1.2) → groove_LEFT (x≈0.20): paths diverge, no crossing with Bob
             # Bob (rope_back, starts at x≈-0.54) → groove_RIGHT (x≈1.00): Bob goes further right
             a_path = _lift_place(alice_pos, groove_left, lift_z)
@@ -1044,8 +1043,7 @@ class SingleThreadPrompter:
 
         # One holding, one not: the one not holding should pick
         if not alice_holding:
-            rope_front = np.asarray(self.env.physics.data.body(ROPE_FRONT_BODY).xpos[:3], dtype=float)
-            a_t = rope_front.copy(); a_t[2] += 0.08
+            a_t = np.asarray(self.env.get_target_pos("Alice", "rope_front_end")[:3], dtype=float)
             a_path = _low_approach(alice_pos, a_t)
             b_path = [bob_pos.copy() for _ in range(4)]
             return (
@@ -1054,8 +1052,7 @@ class SingleThreadPrompter:
                 f"NAME Bob ACTION WAIT PATH {self._format_path(b_path)}"
             )
         else:
-            rope_back = np.asarray(self.env.physics.data.body(ROPE_BACK_BODY).xpos[:3], dtype=float)
-            b_t = rope_back.copy(); b_t[2] += 0.08
+            b_t = np.asarray(self.env.get_target_pos("Bob", "rope_back_end")[:3], dtype=float)
             b_path = _low_approach(bob_pos, b_t)
             a_path = [alice_pos.copy() for _ in range(4)]
             return (

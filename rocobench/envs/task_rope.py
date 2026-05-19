@@ -127,6 +127,32 @@ class MoveRopeTask(MujocoSimEnv):
     def waypoint_std_threshold(self):
         return 0.3
 
+    def get_rope_grasp_target_pos(self, target_name: str) -> Optional[np.ndarray]:
+        """Return a conservative grasp target near a rope end.
+
+        Grasping the exact endpoint is brittle: it can be close to the table,
+        numerically unstable, or hard for IK. Use a small inward offset along
+        the rope direction while still welding the corresponding rope end.
+        """
+        if target_name not in ["rope_front_end", "rope_back_end"]:
+            return None
+
+        front = self.physics.data.body(ROPE_FRONT_BODY).xpos.copy()
+        back = self.physics.data.body(ROPE_BACK_BODY).xpos.copy()
+        if target_name == "rope_front_end":
+            pos = front
+            other = back
+        else:
+            pos = back
+            other = front
+
+        direction = other - pos
+        norm = np.linalg.norm(direction[:2])
+        if norm > 1e-6:
+            pos[:2] += 0.06 * direction[:2] / norm
+        pos[2] = min(max(float(pos[2]) + 0.10, 0.32), 0.46)
+        return pos
+
     def get_target_pos(self, agent_name, target_name) -> Optional[np.ndarray]: 
         ret = None 
         robot_name = self.robot_name_map_inv[agent_name]
@@ -139,11 +165,9 @@ class MoveRopeTask(MujocoSimEnv):
             ret[2] += 0.1
         
         elif target_name == "rope_front_end":
-            ret = self.physics.data.body(ROPE_FRONT_BODY).xpos.copy()
-            ret[2] += 0.1
+            ret = self.get_rope_grasp_target_pos(target_name)
         elif target_name == "rope_back_end":
-            ret = self.physics.data.body(ROPE_BACK_BODY).xpos.copy()
-            ret[2] += 0.1 
+            ret = self.get_rope_grasp_target_pos(target_name)
 
         return ret 
          

@@ -418,7 +418,7 @@ def main(args):
         args.max_failed_waypoints = 0
         logging.warning("MopeRope requires max failed waypoints 0\n")
         if not args.no_feedback:
-            args.tstep = 5
+            args.tsteps = min(args.tsteps, 5)
             logging.warning("MoveRope needs only 5 tsteps\n")
 
     elif args.task == 'pack':
