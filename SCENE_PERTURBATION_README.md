@@ -380,19 +380,19 @@ Sweep 的重点不是目标映射，而是同步协作和物理接触：
 
 ## 6. 当前实验结果汇总
 
-以下结果来自当前 `data/` 目录中已有的 `steps*_success_*.json` 和 `local_eval_summary.json`。其中部分目录不是完整 5 次评测，例如 `rope_default_eval_seed42` 当前只有 3 个 run，`sort_hard_eval_seed42` 当前只有 1 个 run；后续补跑后应继续更新表格。
+以下结果来自当前 `data/` 目录中已有的 `steps*_success_*.json` 和 `local_eval_summary.json`。若同一个 `run_N` 目录中存在多个 `steps*_success_*.json`，按最后修改的结果文件统计。`Rope medium` 目录中包含超过 5 轮的追加运行，本表按统一口径只统计前 5 轮。
 
 | Task | Variant | Runs | Success | Success Rate | Timeout | Avg Time | Main Failure |
 |---|---:|---:|---:|---:|---:|---:|---|
 | Sort | default | 5 | 5 | 100% | 0 | 66.1s | none |
 | Sort | medium | 5 | 1 | 20.0% | 4 | 654.3s | timeout after perturbation |
-| Sort | hard | 1 | 0 | 0.0% | 1 | 626.8s | partial run, timeout |
-| Rope | default | 3 | 3 | 100% | 0 | 57.9s | none in current partial sample |
-| Rope | medium | 9 | 5 | 55.6% | 4 | 380.5s | RRT/IK timeout |
-| Rope | hard | 5 | TBD | TBD | TBD | TBD | TBD |
-| Sweep | default | 5 | TBD | TBD | TBD | TBD | TBD |
+| Sort | hard | 5 | 0 | 0.0% | 5 | 637.4s | all runs timeout |
+| Rope | default | 5 | 5 | 100% | 0 | 129.0s | none |
+| Rope | medium | 5 | 3 | 60.0% | 2 | 343.0s | RRT/IK timeout |
+| Rope | hard | 5 | 2 | 40.0% | 3 | 443.2s | RRT/IK timeout |
+| Sweep | default | 5 | 1 | 20.0% | 1 | 380.2s | sweep/dump not reliable |
 | Sweep | medium | 5 | 0 | 0.0% | 5 | 1112.8s | all runs timeout |
-| Sweep | hard | 5 | TBD | TBD | TBD | TBD | TBD |
+| Sweep | hard | 5 | 0 | 0.0% | 5 | 642.2s | all runs timeout |
 
 ### 6.1 数据来源
 
@@ -404,27 +404,34 @@ data/sort_medium_perturb
 data/sort_hard_eval_seed42
 data/rope_default_eval_seed42
 data/rope_medium_eval_seed42
+data/rope_hard_eval_seed42
+data/sweep_default_eval_seed42
 data/sweep_medium_perturb
+data/sweep_hard_eval_seed42
 ```
 
-当前 `local_eval_summary.json` 只存在于：
+当前 `local_eval_summary.json` 存在于：
 
 ```text
 data/sort_default_eval_seed42/local_eval_summary.json
+data/sort_hard_eval_seed42/local_eval_summary.json
 data/rope_medium_eval_seed42/local_eval_summary.json
+data/rope_hard_eval_seed42/local_eval_summary.json
+data/sweep_default_eval_seed42/local_eval_summary.json
+data/sweep_hard_eval_seed42/local_eval_summary.json
 ```
 
-其余目录通过 `steps*_success_*.json` 反向聚合得到。
+其余目录通过 `steps*_success_*.json` 反向聚合得到。`rope_default_eval_seed42` 当前有效 5 轮来自 `run_0`、`run_1`、`run_2`、`run_4`、`run_5`，缺少 `run_3`，但总样本数仍为 5。
 
 ### 6.2 结果分析
 
 Sort default 达到 `5/5 = 100%`，且没有 timeout，说明原始固定场景下，Sort 的状态化 fallback、panel3/panel5 中转策略、parser 抓取高度修正和 handoff 位置修正已经形成稳定闭环。
 
-Sort medium 降到 `1/5 = 20%`，且 `4/5` timeout，说明一旦物体初始 panel 和 panel 内偏移发生变化，现有 Sort 方案仍有较强的固定流程依赖。它能处理原始 benchmark 的典型接力链路，但在扰动场景下可能出现重复搬运、错误中转、RRT 长时间搜索或目标物体选择顺序不理想等问题。Sort hard 当前只有 1 个 run，结果为 timeout，样本不足但提示高难目标映射打乱会进一步放大问题。
+Sort medium 降到 `1/5 = 20%`，且 `4/5` timeout，说明一旦物体初始 panel 和 panel 内偏移发生变化，现有 Sort 方案仍有较强的固定流程依赖。它能处理原始 benchmark 的典型接力链路，但在扰动场景下可能出现重复搬运、错误中转、RRT 长时间搜索或目标物体选择顺序不理想等问题。Sort hard 为 `0/5 = 0%` 且全部 timeout，说明目标映射打乱和更远初始位置会显著放大 relay planner 的不足。
 
-Rope default 当前 3 个 run 全部成功，平均约 `57.9s`，说明默认 Rope fallback 在较常规几何关系下可以快速完成。Rope medium 使用 9 个 run 统计后为 `5/9 = 55.6%`，其中 4 次 timeout。成功样例基本在 step 1 完成，失败样例多在 step 3 卡住，说明 Rope 的主要瓶颈不是语义理解，而是扰动后的连续物理可执行性：绳子端点、障碍墙和 groove 的相对位置稍有不利，就会导致 IK、碰撞或 RRT 搜索爆炸。
+Rope default 当前 `5/5 = 100%`，说明默认 Rope fallback 在较常规几何关系下可以完成。Rope medium 按前 5 轮统计为 `3/5 = 60%`，其中 2 次 timeout；Rope hard 为 `2/5 = 40%`，其中 3 次 timeout。成功样例基本在 step 1 完成，失败样例多在 step 3 或 step 4 卡住，说明 Rope 的主要瓶颈不是语义理解，而是扰动后的连续物理可执行性：绳子端点、障碍墙和 groove 的相对位置稍有不利，就会导致 IK、碰撞或 RRT 搜索爆炸。
 
-Sweep medium 当前 `0/5 = 0%`，且全部 timeout。这说明 Sweep 对扰动非常敏感。中等扰动改变 cube 分布和 trash bin 目标位置后，当前同步 MOVE/WAIT/SWEEP/DUMP fallback 仍能表达正确任务阶段，但物理执行层可能无法稳定完成扫入 dustpan、dump 到移动后的 trash bin，或在密集/偏移 cube 分布下反复规划不可行路径。
+Sweep default 只有 `1/5 = 20%`，medium 和 hard 均为 `0/5 = 0%` 且全部 timeout。这说明 Sweep 对接触物理和工具姿态非常敏感。即使没有额外扰动，当前同步 MOVE/WAIT/SWEEP/DUMP fallback 也只能偶尔完成完整清扫；中高难扰动改变 cube 分布和 trash bin 目标位置后，物理执行层更容易无法稳定完成扫入 dustpan、dump 到移动后的 trash bin，或在密集/偏移 cube 分布下反复规划不可行路径。
 
 ### 6.3 后续优化方向
 

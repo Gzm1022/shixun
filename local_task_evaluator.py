@@ -35,6 +35,8 @@ def _run_task(args, task: str) -> dict:
         run_name,
         "--data_dir",
         args.output_dir,
+        "--start_id",
+        str(args.start_id),
     ]
 
     if args.skip_display:
@@ -114,6 +116,7 @@ def main():
     parser.add_argument("--output_dir", default="data")
     parser.add_argument("--scene_seed", type=int, default=42)
     parser.add_argument("--run_name", default="")
+    parser.add_argument("--start_id", type=int, default=0)
     parser.add_argument("--comm_mode", default="plan", choices=["chat", "plan", "dialog"])
     parser.add_argument("--variant", default="default", choices=["default", "easy", "medium", "hard"])
     parser.add_argument("--sort_target_mode", default="fixed", choices=["fixed", "permuted"])
