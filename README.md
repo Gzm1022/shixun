@@ -1,6 +1,6 @@
-# RocoBench 评测与 Sort 任务优化
+# RocoBench 协作仓库
 
-本仓库包含 RocoBench 多机器人任务的批量评测脚本、运行入口和本次针对 Sort 任务的优化代码。当前版本重点解决 Sort 任务中局部模型调用失败、重复规划、交接点不可达和评测耗时过长的问题。
+本仓库用于多人协作提升 RoCoBench 六个任务的执行成功率。README 只保留公共运行方式和任务文档索引；各任务的优化细节、验证命令和结果记录在对应的 `*_SOLUTION.md` 中。
 
 ## 环境准备
 
@@ -12,149 +12,60 @@
 uv sync
 ```
 
-之后可以使用：
+之后可以使用 `run_dialog.py` 运行单个任务：
 
 ```bash
-uv run python evaluator.py
+uv run python run_dialog.py --task sort --comm_mode plan --num_runs 1 --tsteps 3 --skip_display --run_name sort_smoke
 ```
 
 第一次执行 `uv sync` 时，`uv` 会创建 `.venv` 虚拟环境；如果本机没有兼容的 Python 3.8，也会自动下载对应解释器。
 
-## 评测输出目录
+## 输出目录
 
-每次运行 `evaluator.py` 后，日志、任务结果和运行产物会统一保存在一个带时间戳的目录中：
-
-```text
-output/run_YYYYMMDD_HHMMSS/
-|-- evaluator.log
-|-- run.json
-|-- summary.json
-`-- tasks/
-    `-- 01_sort/
-        |-- command.txt
-        |-- runs/
-        |   |-- args_YYYYMM_HHMM.json
-        |   `-- run_0/
-        |-- stdout.log
-        |-- stderr.log
-        |-- result.json
-        `-- summary.json
-```
-
-其中：
-
-- `evaluator.log`：本次评测的终端总日志。
-- `stdout.log` / `stderr.log`：单个任务的标准输出和错误输出。
-- `result.json` / `summary.json`：任务级结果统计。
-- `runs/run_x/`：每次 rollout 的视频、HTML、prompt 和 JSON 结果。
-
-## evaluator.py 使用方法
-
-`evaluator.py` 是批量评测入口，支持指定任务、运行次数、最大步数、重规划次数和超时时间。
-
-运行全部默认任务：
-
-```bash
-uv run python evaluator.py
-```
-
-只评测 Sort 任务并输出成功率：
-
-```bash
-OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 1
-```
-
-如果想得到更稳定的 Sort 准确率，可以增加运行次数：
-
-```bash
-OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 5
-```
-
-恢复较慢但更完整的评测配置：
-
-```bash
-OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --full
-```
-
-常用参数：
+`run_dialog.py` 默认把运行产物写入 `data/<run_name>/`：
 
 ```text
---tasks sort              只运行 sort 任务
---runs 5                  每个任务运行 5 次
---tsteps 8                每次运行最多执行 8 个环境步
---num_replans 2           每步最多重规划 2 次
---timeout 180             每次运行的总超时时间
---rrt_timeout 60          单段 RRT 规划超时时间
---no_fallback_first       关闭确定性 fallback-first 规划
---keep_smooth_path        保留 RRT 路径平滑
---full                    使用较慢的完整评测配置
+data/<run_name>/
+|-- args_YYYYMM_HHMM.json
+`-- run_0/
+    |-- step_0/
+    |-- steps*_success_*.json
+    `-- *.html / *.mp4
 ```
 
-## Sort 任务优化说明
+`data/`、`output/`、视频、日志和中间 pickle 都是本地产物，已被 `.gitignore` 忽略。
 
-本次修改重点优化 Sort 任务。Sort 任务不是简单的“抓取并放置”，它强依赖历史状态、物体类别、机器人分工、失败反馈和物理可达性。此前主要失败点是：Alice 将 `pink_polygon` 放到 `panel3` 后，Bob 再抓取该物体时 IK 失败，导致后续步骤无法继续。
+## LLM 配置
 
-本次主要改动如下：
-
-- 在 `evaluator.py` 和 `run_dialog.py` 中增加命令行参数，支持单独评测 Sort，并缩短调试时间。
-- 增加 `fallback_first` 模式，让 Sort 优先使用确定性规则规划，再考虑 LLM 输出。
-- 在 `prompting/plan_prompter.py` 中增加 Sort fallback planner，根据当前 panel、目标 panel 和中转 panel 选择保守动作。
-- 在 `prompting/parser.py` 中增加 Sort 专用抓取稳定策略，对交接后高度过低的物体使用更安全的 top-down grasp pose。
-- 在 `rocobench/envs/task_sort.py` 中调整 `panel3` handoff 目标点，让 Alice 放置后的物体处在 Bob 更容易到达的位置。
-- 增加对空 LLM 响应的保护，避免 `NoneType` 解析崩溃。
-- 增强 HTML 日志生成的鲁棒性，避免异常 prompt JSON 导致可视化保存失败。
-
-## Sort 评测结果
-
-本次修正后，使用 `qwen3.5:27b` 单独评测 Sort：
-
-```text
-OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 1
-Success Rate: 1/1 (100.0%)
-Average Steps: 5.00
-```
-
-这说明当前主要失败点已经从语言规划问题定位为物理交接点问题，并通过 `panel3` handoff 位置修正和保守抓取姿态得到解决。
-
-## 泛化性与过拟合风险
-
-需要注意的是，单次或少量评测达到 100% 并不等于模型或系统已经具备强泛化能力。如果优化方式只是针对固定 seed、固定物体初始位置、固定失败日志写死动作顺序，那么很容易过拟合当前评测场景。
-
-本次 Sort 修改尽量避免直接写固定答案，而是优先加入更通用的机制：
-
-- 使用当前观测判断物体所在 panel、目标 panel 和下一步中转 panel，而不是只记住固定步骤。
-- 使用 `fallback_first` 作为保守兜底策略，减少 LLM 调用失败造成的中断。
-- 将 `panel3` 调整为更合理的交接区域，这是物理可达性修正，而不是单纯针对某一次失败输出硬编码。
-- 在 parser 中加入低位抓取保护，解决交接后物体高度过低导致 IK 不稳定的问题。
-- 对空响应和异常日志做保护，提升系统鲁棒性。
-
-仍然存在的泛化风险：
-
-- 当前 Sort fallback planner 主要基于已有 panel 拓扑和任务物体设计，对完全不同的 Sort 布局未必直接适用。
-- `panel3` handoff 点虽然更符合 Bob 的可达区域，但仍建议在多个 seed、多个 runs 下继续验证。
-- 如果后续为其他任务继续添加规则，应优先抽象成状态表、验证器、失败反馈和物理约束，而不是写死每个任务的固定执行序列。
-
-建议验证方式：
+默认通过环境变量配置 OpenAI-compatible 接口：
 
 ```bash
-OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 5
+export OPENAI_BASE_URL=http://localhost:11434/v1
+export OPENAI_API_KEY=ollama
+export OPENAI_MODEL=Qwen/Qwen3.5-27B
 ```
 
-如果多次运行仍能保持较高成功率，才更能说明这次修改不是单纯“刷一次样例”，而是提升了 Sort 任务的执行稳定性。更进一步，可以改变随机种子进行测试：
+如需个人化客户端，可在本地创建被 `.gitignore` 忽略的 `prompting/openai_client.py`。公共代码默认使用 `prompting/llm_client.py`，没有个人覆盖文件时也能直接运行。
+
+## 任务方案
+
+- [Sort](SORT_SOLUTION.md)
+- [Cabinet](CABINET_SOLUTION.md)
+- [Rope](ROPE_SOLUTION.md)
+- [Sweep](SWEEP_SOLUTION.md)
+- [Sandwich](SANDWICH_SOLUTION.md)
+- [Pack Grocery](PACK_GROCERY_SOLUTION.md)
+
+## 评测入口
+
+远程仓库不再维护 `evaluator.py` / `evaluate.py`，这类批量评测脚本按个人环境本地创建并被 `.gitignore` 忽略。公共复现入口是 `run_dialog.py`；任务相关推荐命令写在对应的 `*_SOLUTION.md` 中。
+
+## 单任务运行
+
+直接运行单个 rollout：
 
 ```bash
-OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 5 --seed 1
-OLLAMA_MODEL=qwen3.5:27b uv run python evaluator.py --tasks sort --runs 5 --seed 2
-```
-
-总体来说，本次 100% 结果应理解为：当前失败案例已经被定位并修复，Sort 在当前评测配置下稳定性明显提升；但是否具备更强泛化性，还需要多 seed、多初始状态和更多任务组合继续验证。
-
-## run_dialog.py 单任务运行
-
-如果不通过 `evaluator.py`，也可以直接运行单个 Sort rollout：
-
-```bash
-OLLAMA_MODEL=qwen3.5:27b uv run python run_dialog.py --task sort --comm_mode plan --num_runs 1 --tsteps 8 --num_replans 2 --skip_display --skip_smooth_path --fallback_first --run_name sort_debug
+uv run python run_dialog.py --task sort --comm_mode plan --num_runs 1 --tsteps 8 --num_replans 2 --skip_display --skip_smooth_path --fallback_first --run_name sort_debug
 ```
 
 运行结果会保存在：
@@ -163,7 +74,11 @@ OLLAMA_MODEL=qwen3.5:27b uv run python run_dialog.py --task sort --comm_mode pla
 data/sort_debug/
 ```
 
-或由 `evaluator.py` 指定到对应的 `output/run_YYYYMMDD_HHMMSS/` 目录。
+批量评测如需汇总多个任务，可在本地创建被忽略的 `evaluator.py` 调用这些命令，不要提交到远程仓库。
+
+## 协作规则
+
+提交前请阅读 [AGENTS.md](AGENTS.md)。远程仓库不得包含个人密钥、代理配置、运行产物、个人 LLM 客户端或只适配单人环境的 runner/evaluator 改动。
 
 ## pack_code.sh 使用方法
 
@@ -190,4 +105,4 @@ chmod +x pack_code.sh
 
 - 本项目默认使用 `uv run` 启动 Python 脚本。
 - 使用本地 Ollama 模型时，需要提前确认模型已经拉取并启动服务。
-- 当前 Sort 优化主要面向快速调试和稳定跑分；正式评测时如果平台替换 `evaluator.py`，核心 Sort 规划和物理修正仍位于 `prompting/` 与 `rocobench/envs/` 中。
+- 任务相关优化、风险和验证结果统一记录在对应 `*_SOLUTION.md` 中。

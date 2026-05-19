@@ -77,12 +77,12 @@ Sandwich 任务中，两个机器人需要合作制作三明治：
 
 ### 4. 大模型适配
 
-当前使用本地 Ollama 兼容 OpenAI API：
+公共代码默认通过 `prompting/llm_client.py` 读取 OpenAI-compatible 环境变量；个人需要特殊客户端时，可以在本地创建被 `.gitignore` 忽略的 `prompting/openai_client.py`。
 
-```python
-openai.api_key = "ollama"
-openai.api_base = "http://localhost:11434/v1"
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+```bash
+export OPENAI_BASE_URL=http://localhost:11434/v1
+export OPENAI_API_KEY=ollama
+export OPENAI_MODEL=Qwen/Qwen3.5-27B
 ```
 
 ## 推荐测试命令

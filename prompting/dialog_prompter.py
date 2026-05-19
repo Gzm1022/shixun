@@ -2,8 +2,6 @@ import os
 import time
 import json
 import pickle 
-import openai
-import requests
 import numpy as np
 from datetime import datetime
 from os.path import join
@@ -12,6 +10,7 @@ from rocobench.subtask_plan import LLMPathPlan
 from rocobench.rrt_multi_arm import MultiArmRRT
 from rocobench.envs import MujocoSimEnv, EnvState 
 from .feedback import FeedbackManager
+from .llm_client import chat_completion, response_content, response_usage
 from .parser import LLMResponseParser
 
 
@@ -265,16 +264,27 @@ Your response is:
                     TODO: interact with your LLM here.
                     input system_prompt and user_prompt, and return response.
                 '''
+                api_response = chat_completion(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    llm_source=self.llm_source,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                )
+                usage = response_usage(api_response)
+                response = response_content(api_response)
 
                 print('======= response ======= \n ', response)
                 print('======= usage ======= \n ', usage)
                 break
-            except:
-                print("API error, try again")
+            except Exception as exc:
+                print(f"API error, try again: {exc}")
                 time.sleep(2)
             continue
         # breakpoint()
-        return response, usage
+        return response or "", usage or {}
     
     def post_execute_update(self, obs_desp: str, execute_success: bool, parsed_plan: str):
         if execute_success: 

@@ -68,12 +68,60 @@ Sort 任务中，三个机器人需要将立方体分拣到指定目标面板：
 
 ### 4. 大模型适配
 
-当前使用本地 Ollama 兼容 OpenAI API：
+公共代码默认通过 `prompting/llm_client.py` 读取 OpenAI-compatible 环境变量；个人需要特殊客户端时，可以在本地创建被 `.gitignore` 忽略的 `prompting/openai_client.py`。
 
-```python
-openai.api_key = "ollama"
-openai.api_base = "http://localhost:11434/v1"
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+```bash
+export OPENAI_BASE_URL=http://localhost:11434/v1
+export OPENAI_API_KEY=ollama
+export OPENAI_MODEL=Qwen/Qwen3.5-27B
+```
+
+## 本轮 Sort 优化记录
+
+本次修改重点优化 Sort 任务。Sort 任务不是简单的抓取并放置，它强依赖历史状态、物体类别、机器人分工、失败反馈和物理可达性。此前主要失败点是：Alice 将 `pink_polygon` 放到 `panel3` 后，Bob 再抓取该物体时 IK 失败，导致后续步骤无法继续。
+
+主要公共改动如下：
+
+- 在 `run_dialog.py` 中增加 `--rrt_timeout`、`--skip_smooth_path`、`--fallback_first`，支持更稳定的单任务调试。
+- 在 `prompting/plan_prompter.py` 中增加 Sort fallback planner，根据当前 panel、目标 panel 和中转 panel 选择保守动作。
+- 在 `prompting/parser.py` 中增加 Sort 专用抓取稳定策略，对交接后高度过低的物体使用更安全的 top-down grasp pose。
+- 在 `rocobench/envs/task_sort.py` 中调整 `panel3` handoff 目标点，让 Alice 放置后的物体处在 Bob 更容易到达的位置。
+- 增加对空 LLM 响应的保护，避免 `NoneType` 解析崩溃。
+- 增强 HTML 日志生成的鲁棒性，避免异常 prompt JSON 导致可视化保存失败。
+
+已观察到的验证结果：
+
+```text
+OLLAMA_MODEL=qwen3.5:27b uv run python run_dialog.py --task sort --comm_mode plan --num_runs 1 --tsteps 8 --num_replans 2 --skip_display --skip_smooth_path --fallback_first --run_name sort_debug
+Run result: success in 5 steps
+```
+
+这说明当前主要失败点已经从语言规划问题定位为物理交接点问题，并通过 `panel3` handoff 位置修正和保守抓取姿态得到缓解。
+
+### 泛化性与过拟合风险
+
+单次或少量评测达到 100% 并不等于系统已经具备强泛化能力。如果优化方式只是针对固定 seed、固定物体初始位置、固定失败日志写死动作顺序，很容易过拟合当前评测场景。
+
+本次 Sort 修改尽量避免直接写固定答案，而是优先加入更通用的机制：
+
+- 使用当前观测判断物体所在 panel、目标 panel 和下一步中转 panel，而不是只记住固定步骤。
+- 使用 `fallback_first` 作为保守兜底策略，减少 LLM 调用失败造成的中断。
+- 将 `panel3` 调整为更合理的交接区域，这是物理可达性修正，而不是单纯针对某一次失败输出硬编码。
+- 在 parser 中加入低位抓取保护，解决交接后物体高度过低导致 IK 不稳定的问题。
+- 对空响应和异常日志做保护，提升系统鲁棒性。
+
+仍然存在的泛化风险：
+
+- 当前 Sort fallback planner 主要基于已有 panel 拓扑和任务物体设计，对完全不同的 Sort 布局未必直接适用。
+- `panel3` handoff 点虽然更符合 Bob 的可达区域，但仍建议在多个 seed、多个 runs 下继续验证。
+- 如果后续为其他任务继续添加规则，应优先抽象成状态表、验证器、失败反馈和物理约束，而不是写死每个任务的固定执行序列。
+
+建议继续验证：
+
+```bash
+OLLAMA_MODEL=qwen3.5:27b uv run python run_dialog.py --task sort --comm_mode plan --num_runs 5 --tsteps 8 --num_replans 2 --skip_display --skip_smooth_path --fallback_first --run_name sort_eval_seed0 --seed 0
+OLLAMA_MODEL=qwen3.5:27b uv run python run_dialog.py --task sort --comm_mode plan --num_runs 5 --tsteps 8 --num_replans 2 --skip_display --skip_smooth_path --fallback_first --run_name sort_eval_seed1 --seed 1
+OLLAMA_MODEL=qwen3.5:27b uv run python run_dialog.py --task sort --comm_mode plan --num_runs 5 --tsteps 8 --num_replans 2 --skip_display --skip_smooth_path --fallback_first --run_name sort_eval_seed2 --seed 2
 ```
 
 ## 推荐测试命令

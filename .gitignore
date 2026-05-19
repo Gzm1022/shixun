@@ -3,3 +3,21 @@ __pycache__/
 output/
 data/
 *.zip
+
+# Local credentials and LLM/runtime overrides.
+.env
+.env.*
+openai_key.json
+prompting/openai_client.py
+evaluator.py
+evaluate.py
+
+# Generated run artifacts.
+*.log
+*.mp4
+*.m4v
+*.html
+*.pkl
+
+# Local copies of commonly customized entry points.
+*.local.py

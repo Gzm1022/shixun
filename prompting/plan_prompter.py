@@ -1,11 +1,11 @@
-﻿import os 
+import os
 import json
 import pickle 
 import numpy as np
 from rocobench.envs import MujocoSimEnv, EnvState
-import openai
 from datetime import datetime
 from .feedback import FeedbackManager
+from .llm_client import chat_completion, response_content, response_usage
 from .parser import LLMResponseParser
 from typing import List, Tuple, Dict, Union, Optional, Any
 
@@ -78,10 +78,7 @@ Each <coord> is a tuple (x,y,z) for gripper location, follow these steps to plan
         e.g. given path [(0.1, 0.2, 0.3), (0.2, 0.2. 0.3), (0.3, 0.4. 0.7)], the distance between steps (0.1, 0.2, 0.3)-(0.2, 0.2. 0.3) is too low, and between (0.2, 0.2. 0.3)-(0.3, 0.4. 0.7) is too high. You can change the path to [(0.1, 0.2, 0.3), (0.15, 0.3. 0.5), (0.3, 0.4. 0.7)] 
     If a plan failed to execute, re-plan to choose more feasible steps in each PATH, or choose different actions.
 """
-OPENAI_KEY = str(json.load(open("openai_key.json")))
-openai.api_key = "ollama"
-openai.api_base = "http://localhost:11434/v1"
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+DEFAULT_USER_PROMPT = "Generate the next robot plan. Output the required EXECUTE block."
 
 
 def get_chat_prompt(env: MujocoSimEnv):
@@ -1276,24 +1273,25 @@ Re-format to strictly follow [Action Output Instruction]!
         for n in range(self.max_api_queries):
             print('querying {}th time'.format(n))
             try:
-                response = openai.ChatCompletion.create(
-                    model=OLLAMA_MODEL,
-                    messages=[
-                        # {"role": "user", "content": user_prompt},
-                        {"role": "system", "content": system_prompt},                                    
-                    ],
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt or DEFAULT_USER_PROMPT},
+                ]
+                api_response = chat_completion(
+                    messages=messages,
+                    llm_source=self.llm_source,
                     max_tokens=self.max_tokens,
-                    temperature=self.temperature, 
-                    )
-                usage = response['usage']
-                response = response['choices'][0]['message']["content"]
+                    temperature=self.temperature,
+                )
+                usage = response_usage(api_response)
+                response = response_content(api_response)
                 print('======= response ======= \n ', response)
                 print('======= usage ======= \n ', usage)
                 break
-            except:
-                print("API error, try again")
+            except Exception as exc:
+                print(f"API error, try again: {exc}")
             continue
-        return response, usage
+        return response or "", usage or {}
 
     
 
