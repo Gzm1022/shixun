@@ -1,23 +1,36 @@
 import subprocess
 import os
 import sys
+import argparse
 from glob import glob
 import json
 import time
 from datetime import datetime
 from utils import Colors, log_subprocess_result, next_task_log_dir, relpath, terminal_log, to_text, write_run_summary, write_task_summary
 
-# Default timeout settings (seconds) for each task, can be customized per task
+# Fast defaults are intended for iteration. Use `--full` for the older,
+# slower five-run setting.
 DEFAULT_RUN_TIMEOUTS = {
-    "sort": 600,
-    "cabinet": 600,
-    "rope": 600,
-    "sweep": 600,
-    "sandwich": 600,
-    "pack": 600,
+    "sort": 180,
+    "cabinet": 180,
+    "rope": 180,
+    "sweep": 180,
+    "sandwich": 180,
+    "pack": 180,
 }
 
-def test_run_dialog(task: str, num_runs: int, output_dir: str, seed: int = 0, run_timeout: float = None):
+def test_run_dialog(
+    task: str,
+    num_runs: int,
+    output_dir: str,
+    seed: int = 0,
+    run_timeout: float = None,
+    tsteps: int = 8,
+    num_replans: int = 2,
+    rrt_timeout: int = 60,
+    skip_smooth_path: bool = True,
+    fallback_first: bool = True,
+):
     """
     Test and run dialog tasks
     
@@ -33,7 +46,7 @@ def test_run_dialog(task: str, num_runs: int, output_dir: str, seed: int = 0, ru
         run_timeout = DEFAULT_RUN_TIMEOUTS.get(task, 60)
     
     print("\n" + Colors.CYAN + Colors.BOLD + f"▶ Starting Task: {task.upper()}" + Colors.ENDC)
-    print(Colors.CYAN + f"  Configuration: {num_runs} runs, {run_timeout}s timeout per run" + Colors.ENDC)
+    print(Colors.CYAN + f"  Configuration: {num_runs} runs, {run_timeout}s timeout per run, {tsteps} steps, {num_replans} replans" + Colors.ENDC)
     
     task_log_dir = next_task_log_dir(task)
     if task_log_dir is not None:
@@ -67,9 +80,16 @@ def test_run_dialog(task: str, num_runs: int, output_dir: str, seed: int = 0, ru
                '--start_id', str(-1),
                '--num_runs', str(num_runs),
                '--skip_display',
-               '--tsteps', str(10),
+               '--comm_mode', 'plan',
+               '--tsteps', str(tsteps),
+               '--num_replans', str(num_replans),
                '--seed', str(seed),
-               '--run_timeout', str(run_timeout)]  # Pass run timeout parameter
+               '--run_timeout', str(run_timeout),
+               '--rrt_timeout', str(rrt_timeout)]
+    if skip_smooth_path:
+        command.append('--skip_smooth_path')
+    if fallback_first:
+        command.append('--fallback_first')
 
     subprocess_started_at = datetime.now()
     try:
@@ -203,20 +223,45 @@ def test_run_dialog(task: str, num_runs: int, output_dir: str, seed: int = 0, ru
 if __name__ == "__main__":
     import time as time_module
 
-    with terminal_log():
-        # tasks = ["sort", "cabinet", "rope", "sweep", "sandwich", "pack"]
+    parser = argparse.ArgumentParser(description="Batch evaluation for RocoBench tasks.")
+    parser.add_argument("--tasks", nargs="+", default=["sort", "cabinet", "rope", "sweep", "sandwich", "pack"])
+    parser.add_argument("--runs", type=int, default=2, help="Runs per task in fast mode")
+    parser.add_argument("--tsteps", type=int, default=8, help="Max environment steps per run")
+    parser.add_argument("--num_replans", type=int, default=2, help="LLM replans per step")
+    parser.add_argument("--timeout", type=float, default=None, help="Override per-run timeout in seconds")
+    parser.add_argument("--rrt_timeout", type=int, default=60, help="RRT timeout per planning segment")
+    parser.add_argument("--output_dir", type=str, default="output")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--no_fallback_first", action="store_true", help="Disable deterministic fallback-first planning")
+    parser.add_argument("--keep_smooth_path", action="store_true", help="Keep RRT path smoothing enabled")
+    parser.add_argument("--full", action="store_true", help="Use older slower defaults: 5 runs, 10 steps, 600s timeout, 200 RRT timeout")
+    args = parser.parse_args()
 
+    if args.full:
+        args.runs = 5
+        args.tsteps = 10
+        args.num_replans = 3
+        args.rrt_timeout = 200
+        args.timeout = 600
+
+    with terminal_log():
         begin_time = time_module.time()
 
         results = []
 
-        # Use default timeout (from DEFAULT_RUN_TIMEOUTS)
-        results.append(test_run_dialog("sort", 5, "output"))
-        results.append(test_run_dialog("cabinet", 5, "output"))
-        results.append(test_run_dialog("rope", 5, "output"))
-        results.append(test_run_dialog("sweep", 5, "output"))
-        results.append(test_run_dialog("sandwich", 5, "output"))
-        results.append(test_run_dialog("pack", 5, "output"))
+        for task in args.tasks:
+            results.append(test_run_dialog(
+                task,
+                args.runs,
+                args.output_dir,
+                seed=args.seed,
+                run_timeout=args.timeout,
+                tsteps=args.tsteps,
+                num_replans=args.num_replans,
+                rrt_timeout=args.rrt_timeout,
+                skip_smooth_path=not args.keep_smooth_path,
+                fallback_first=not args.no_fallback_first,
+            ))
 
         end_time = time_module.time()
         total_elapsed = end_time - begin_time

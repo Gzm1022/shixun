@@ -59,6 +59,7 @@ class LLMRunner:
         temperature: float = 0.0,
         llm_source: str = "gpt4",
         run_timeout: float = 600,  # Default 10 minutes timeout
+        fallback_first: bool = False,
         ):
         self.env = env
         self.env.reset()
@@ -102,6 +103,7 @@ class LLMRunner:
         self.skip_display = skip_display
         self.split_parsed_plans = split_parsed_plans
         self.temperature = temperature
+        self.fallback_first = fallback_first
         self.parser = LLMResponseParser(
             self.env,
             llm_output_mode,
@@ -134,6 +136,7 @@ class LLMRunner:
                 comm_mode=llm_comm_mode,
                 temperature=self.temperature,
                 llm_source=llm_source,
+                fallback_first=self.fallback_first,
             )
 
         else:
@@ -473,8 +476,9 @@ def main(args):
             control_freq=args.control_freq,
             use_weld=args.use_weld,
             skip_direct_path=0,
-            skip_smooth_path=0,
+            skip_smooth_path=args.skip_smooth_path,
             check_relative_pose=args.rel_pose,
+            timeout=args.rrt_timeout,
         ),
         direct_waypoints=args.direct_waypoints,
         max_failed_waypoints=args.max_failed_waypoints,
@@ -485,6 +489,7 @@ def main(args):
         temperature=args.temperature,
         llm_source=args.llm_source,
         run_timeout=args.run_timeout,
+        fallback_first=args.fallback_first,
     )
     runner.run(args)
 
@@ -516,6 +521,9 @@ if __name__ == "__main__":
     parser.add_argument("--llm_source", "-llm", type=str, default="llama3.3:latest") # You can choose one model here.
     parser.add_argument("--seed", "-seed", type=int, default=0)
     parser.add_argument("--run_timeout", "-rt", type=float, default=600, help="Timeout for each run in seconds (default: 600s = 10min)")
+    parser.add_argument("--rrt_timeout", type=int, default=200, help="RRT timeout for each planning segment in iterations")
+    parser.add_argument("--skip_smooth_path", action="store_true", help="Skip RRT path smoothing to speed up evaluation")
+    parser.add_argument("--fallback_first", action="store_true", help="Try deterministic task fallback before querying the LLM")
     logging.basicConfig(level=logging.INFO)
 
     args = parser.parse_args()

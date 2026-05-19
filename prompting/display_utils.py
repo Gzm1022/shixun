@@ -240,7 +240,8 @@ def save_episode_html(
             else:
                 assert isinstance(_data, list), "json data must be a list or dict"
             filter_data = [
-                di for di in _data if di.get("sender", None) in sender_keys
+                di for di in _data
+                if isinstance(di, dict) and di.get("sender", None) in sender_keys
             ]
             json_data.extend(filter_data)
 

@@ -33,6 +33,8 @@ class LLMResponseParser:
 
     def parse(self, obs: EnvState, response: str) -> Tuple[bool, str, List[LLMPathPlan]]: 
         parsed = ''  
+        if response is None:
+            return False, "Response is None; LLM call failed or returned no content.", []
         for keyword in self.response_keywords:
             if keyword not in response: 
                 return False, f"Response does not contain {keyword}." , []
@@ -317,6 +319,14 @@ class LLMResponseParser:
 
             pick_pos = obj_state.sites[site_name].xpos
             pick_quat = obj_state.sites[site_name].xquat 
+            if self.env.__class__.__name__ == "SortOneBlockTask":
+                pick_pos = pick_pos.copy()
+                # Sort handoff objects can settle with a very low top site
+                # after another robot places them. Panda/Bob often cannot IK
+                # directly to that low pose, so use a conservative top-down
+                # grasp pose while keeping the same object/site grasp target.
+                pick_pos[2] = max(float(pick_pos[2]) + 0.10, 0.30)
+                pick_quat = robot_state.ee_xquat.copy()
 
         tograsp = (obj_name, site_name, 1) 
         

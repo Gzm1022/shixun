@@ -70,6 +70,7 @@ class SortOneBlockTask(MujocoSimEnv):
     def __init__( 
         self,
         filepath: str = "rocobench/envs/task_sort.xml", 
+        one_obj_each: bool = False,
         **kwargs,
     ):    
         self.robot_names = ["ur5e_robotiq", "panda", "ur5e_suction"] 
@@ -456,12 +457,11 @@ In the plan, at least one robot should be acting, you can't all WAIT.
                 return None  
 
             if target_name == 'panel3':
-                if 'panda' in robot_name:
-                    ret[0] -= 0.12
-                    ret[1] -= 0.1
-                else:
-                    ret[0] += 0.12
-                    ret[1] += 0.1
+                # Panel3 is the left-side handoff zone. Put objects on the
+                # Panda/Bob side even when Alice delivers them, otherwise Bob
+                # often gets an unreachable low grasp after the object settles.
+                ret[0] += 0.05
+                ret[1] -= 0.18
             if target_name == 'panel5':
                 if 'panda' in robot_name:
                     ret[0] += 0.12

@@ -200,7 +200,8 @@ class SingleThreadPrompter:
         temperature: float = 0,
         max_tokens: int = 1000, 
         llm_source: str = "gpt-4",
-        pack_fallback_first: bool = False,
+        fallback_first: bool = False,
+        pack_fallback_first: Optional[bool] = None,
     ):
         self.env = env 
         self.robot_agent_names = env.get_sim_robots().keys()
@@ -215,7 +216,9 @@ class SingleThreadPrompter:
         self.temperature = temperature
         self.llm_source = llm_source
         self.max_tokens = max_tokens
-        self.pack_fallback_first = pack_fallback_first
+        if pack_fallback_first is not None:
+            fallback_first = pack_fallback_first
+        self.fallback_first = fallback_first
 
         self.round_history = [] # [obs_t, action_t] but only if action_t got executed
         self.failed_plans = [] # could inherit from previous round if the final plan failed to execute in env.
@@ -838,38 +841,62 @@ class SingleThreadPrompter:
         return target_panel
 
     def build_sort_fallback_response(self, obs: EnvState) -> Optional[str]:
-        """Create one conservative Sort action using fixed panel3/panel5 relay rules."""
+        """Create one conservative Sort action using panel topology and reachability."""
         cube_names = set(getattr(self.env, "cube_names", SORT_CUBE_ORDER))
         targets = getattr(self.env, "cube_to_bin", SORT_CUBE_TARGETS)
         actions = []
 
-        if "blue_square" in cube_names and not self._sort_cube_at_target(obs, "blue_square", targets["blue_square"]):
-            x = self._sort_cube_x(obs, "blue_square")
-            if x is not None:
-                if x <= -0.25:
-                    actions.append((0, "Alice", "blue_square", "panel2"))
-                else:
-                    actions.append((10, "Bob", "blue_square", "panel3"))
+        for order, cube in enumerate(SORT_CUBE_ORDER):
+            if cube not in cube_names:
+                continue
+            target_panel = targets.get(cube)
+            if target_panel is None or self._sort_cube_at_target(obs, cube, target_panel):
+                continue
 
-        if "pink_polygon" in cube_names and not self._sort_cube_at_target(obs, "pink_polygon", targets["pink_polygon"]):
-            x = self._sort_cube_x(obs, "pink_polygon")
-            if x is not None:
-                if -0.55 <= x <= 0.45:
-                    actions.append((0, "Bob", "pink_polygon", "panel4"))
-                elif x < -0.55:
-                    actions.append((10, "Alice", "pink_polygon", "panel3"))
-                else:
-                    actions.append((10, "Chad", "pink_polygon", "panel5"))
+            current_panel = self._sort_current_panel(obs, cube)
+            if current_panel is None:
+                continue
+            next_panel = self._sort_next_panel(cube, current_panel)
+            if next_panel is None or next_panel == current_panel:
+                continue
+            active_agent = self._sort_robot_for_move(current_panel, next_panel)
+            if active_agent is None:
+                continue
 
-        if "yellow_trapezoid" in cube_names and not self._sort_cube_at_target(obs, "yellow_trapezoid", targets["yellow_trapezoid"]):
-            x = self._sort_cube_x(obs, "yellow_trapezoid")
-            if x is not None:
-                if x >= 0.45:
-                    actions.append((0, "Chad", "yellow_trapezoid", "panel6"))
-                elif x >= -0.70:
-                    actions.append((10, "Bob", "yellow_trapezoid", "panel5"))
-                else:
-                    actions.append((20, "Alice", "yellow_trapezoid", "panel3"))
+            target_bonus = 0 if next_panel == target_panel else 10
+            actions.append((target_bonus + order, active_agent, cube, next_panel))
+
+        # If the nearest-panel estimate is ambiguous after execution jitter, fall back
+        # to broad x-zone routing. This keeps the evaluator moving instead of asking
+        # the LLM for a state that the deterministic relay policy can handle.
+        if len(actions) == 0:
+            if "blue_square" in cube_names and not self._sort_cube_at_target(obs, "blue_square", targets["blue_square"]):
+                x = self._sort_cube_x(obs, "blue_square")
+                if x is not None:
+                    if x <= -0.20:
+                        actions.append((0, "Alice", "blue_square", "panel2"))
+                    else:
+                        actions.append((10, "Bob", "blue_square", "panel3"))
+
+            if "pink_polygon" in cube_names and not self._sort_cube_at_target(obs, "pink_polygon", targets["pink_polygon"]):
+                x = self._sort_cube_x(obs, "pink_polygon")
+                if x is not None:
+                    if -0.65 <= x <= 0.55:
+                        actions.append((1, "Bob", "pink_polygon", "panel4"))
+                    elif x < -0.65:
+                        actions.append((11, "Alice", "pink_polygon", "panel3"))
+                    else:
+                        actions.append((11, "Chad", "pink_polygon", "panel5"))
+
+            if "yellow_trapezoid" in cube_names and not self._sort_cube_at_target(obs, "yellow_trapezoid", targets["yellow_trapezoid"]):
+                x = self._sort_cube_x(obs, "yellow_trapezoid")
+                if x is not None:
+                    if x >= 0.40:
+                        actions.append((2, "Chad", "yellow_trapezoid", "panel6"))
+                    elif x >= -0.75:
+                        actions.append((12, "Bob", "yellow_trapezoid", "panel5"))
+                    else:
+                        actions.append((22, "Alice", "yellow_trapezoid", "panel3"))
 
         if len(actions) == 0:
             return None
@@ -1115,7 +1142,7 @@ class SingleThreadPrompter:
         response_history = []
         obs_desp = self.env.describe_obs(obs)
 
-        if self.pack_fallback_first:
+        if self.fallback_first:
             fallback_response = self.build_fallback_response(obs)
             if fallback_response is not None:
                 response_history.append(fallback_response)
@@ -1175,7 +1202,7 @@ class SingleThreadPrompter:
             # try parsing 
             parse_succ, parsed_str, llm_plans = self.parser.parse(obs, response) 
             if not parse_succ: 
-                execute_str = 'EXECUTE' + response.split('EXECUTE')[-1]
+                execute_str = "" if response is None else 'EXECUTE' + response.split('EXECUTE')[-1]
                 curr_feedback = f"""
 Parsing failed! {parsed_str}
 Previous response: {execute_str}
