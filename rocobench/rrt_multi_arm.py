@@ -99,7 +99,7 @@ class MultiArmRRT:
                         breakpoint() 
                     self.inhand_object_info[name] = (body_name, site_name, joint_name, (qpos_slice.start, qpos_slice.stop))
         return 
- 
+
     
     def set_ungraspable(
         self, 
@@ -174,7 +174,8 @@ class MultiArmRRT:
                         ),
                     obj_quat,
                     )
-                rel_pos = obj_pos - gripper_pose.position 
+                ee_rot = quaternions.quat2mat(gripper_pose.orientation)
+                rel_pos = ee_rot.T @ (obj_pos - gripper_pose.position)
                 obj_transforms[robot_name] = (rel_pos, rel_rot)
             else:
                 obj_transforms[robot_name] = None
@@ -193,7 +194,8 @@ class MultiArmRRT:
                 rel_pos, rel_rot = obj_transforms[robot_name] 
                 new_ee_pos = ee_poses[robot_name].position
                 new_ee_quat = ee_poses[robot_name].orientation 
-                target_pos = new_ee_pos + rel_pos 
+                new_ee_rot = quaternions.quat2mat(new_ee_quat)
+                target_pos = new_ee_pos + new_ee_rot @ rel_pos
                 target_quat = quaternions.qmult(new_ee_quat, rel_rot) 
                 result = self.solve_ik(
                     physics,
@@ -212,7 +214,7 @@ class MultiArmRRT:
             return ee_poses
         # physics.step(10) # to make sure the physics is stable
         return physics # a copy of the original physics object 
- 
+
     
     def check_joint_range(
         self, 
@@ -238,7 +240,7 @@ class MultiArmRRT:
         target_pos,
         target_quat,
         joint_names, 
-        tol=1e-14,
+        tol=1e-6,
         max_steps=300,
         max_resets=20,
         inplace=True, 
@@ -249,6 +251,7 @@ class MultiArmRRT:
         check_relative_pose=False
     ):
         physics_cp = physics.copy(share_model=True)
+        accepted_result = None
         
         def reset_fn(physics):
             model = physics.named.model 
@@ -303,12 +306,13 @@ class MultiArmRRT:
             else:
                 need_reset = True
             if not need_reset:
+                accepted_result = result
                 break
         # img = physics_cp.render(camera_id='teaser', height=400, width=400)
         # plt.imshow(img)
         # plt.show()
 
-        return result if result.success else None
+        return accepted_result
 
     def inverse_kinematics_all(
         self,
@@ -332,7 +336,7 @@ class MultiArmRRT:
             if robot.use_ee_rest_quat:
                 quat = quaternions.qmult(
                     quat, robot.ee_rest_quat
-                ), # TODO 
+                )
             # print(robot.ee_site_name, pos, quat, robot.joint_names)
             qpos_idxs = robot.joint_idxs_in_qpos     
             result = self.solve_ik(
@@ -341,7 +345,7 @@ class MultiArmRRT:
                 target_pos=pos,
                 target_quat=quat,
                 joint_names=robot.ik_joint_names,
-                tol=1e-14,
+                tol=1e-6,
                 max_steps=300,
                 inplace=inplace,  
                 qpos_idxs=qpos_idxs,
@@ -422,13 +426,8 @@ class MultiArmRRT:
                         allowed.add(
                             frozenset([ee_id, _id])
                             ) 
-                # dangerous: allow collision between all arm links and the object
-                for arm_id in robot.collision_link_ids:
-                    for _id in graspable_ids:
-                        # if _id == 40: # broom in sweeping task
-                        allowed.add(
-                            frozenset([arm_id, _id])
-                        )
+                # Task envs can still explicitly allow broader contacts via
+                # get_allowed_collision_pairs(); default grasp allowance is EE-only.
         return allowed 
 
     def get_collided_links(
@@ -660,6 +659,7 @@ class MultiArmRRT:
         all_paths, all_info = [], []
         duration = 0 
         iteration = 0
+        init_samples = [] if init_samples is None else list(init_samples)
         def collision_fn(q: np.ndarray, show: bool = False):
             return self.check_collision(
                 robot_qpos=q,
@@ -670,14 +670,6 @@ class MultiArmRRT:
                 show=show,
                 # detect_grasp=False, TODO?
             )
-        
-        # still try direct path first 
-        if not skip_direct_path:
-            start_time = time()
-            path = direct_path(start_qpos, goal_qpos, self.extend_ee_l2, collision_fn)
-            if path is not None:
-                return path, f"ReasonDirect_time{time() - start_time}_iter1"
-
         
         if not skip_endpoint_collision_check:
             if collision_fn(goal_qpos, show=0): 
@@ -692,6 +684,15 @@ class MultiArmRRT:
                 # omit this waypoint and try planning with pruned init_sample 
             print(f"Given waypoints: {len(init_samples)}, valid: {len(valid_init_samples)} points")
             init_samples = valid_init_samples
+
+        has_mandatory_waypoints = len(init_samples) > 0
+        # If valid LLM/procedural waypoints exist, treat them as mandatory
+        # segment goals. A global direct path can skip lift/corridor semantics.
+        if not skip_direct_path and not has_mandatory_waypoints:
+            start_time = time()
+            path = direct_path(start_qpos, goal_qpos, self.extend_ee_l2, collision_fn)
+            if path is not None:
+                return path, f"ReasonDirect_time{time() - start_time}_iter1"
 
         for i, interm_goal_qpos in enumerate(init_samples[::-1] + [goal_qpos]):
             interm_start_qpos = start_qpos if i == 0 else init_samples[::-1][i-1]
@@ -710,6 +711,7 @@ class MultiArmRRT:
                 elif collision_fn(interm_goal_qpos): 
                     return None, f"ReasonCollisionAtGoal_time0_iter0"
                     
+            segment_timeout = max(1e-6, timeout - duration)
             paths, info = birrt(
                     start_conf=interm_start_qpos,
                     goal_conf=interm_goal_qpos,
@@ -727,12 +729,12 @@ class MultiArmRRT:
                     collision_fn=collision_fn,
                     iterations=800,
                     smooth_iterations=200,
-                    timeout=timeout,
+                    timeout=segment_timeout,
                     greedy=True,
                     np_random=self.np_random,
                     smooth_extend_fn=self.extend_ee_l2,
                     skip_direct_path=skip_direct_path,
-                    skip_smooth_path=skip_smooth_path, # enable to make sure it passes through the valid init_samples 
+                    skip_smooth_path=skip_smooth_path, # segment-level shortcut is safe; global smoothing is handled below
                 ) 
             sub_duration = float(info.split("time")[1].split("_")[0])
             sub_iteration = int(info.split("iter")[1].split("_")[0])
@@ -740,12 +742,15 @@ class MultiArmRRT:
                 
             if paths is None: 
                 return None, f"Reason{reason}_time{sub_duration}_iter{sub_iteration}" 
-            all_paths.extend(paths)
+            if len(all_paths) > 0:
+                all_paths.extend(paths[1:])
+            else:
+                all_paths.extend(paths)
             all_info.append(info)
             duration += sub_duration
             iteration += sub_iteration
         
-        if skip_smooth_path:
+        if skip_smooth_path or has_mandatory_waypoints:
             return all_paths, f"ReasonSuccess_time{duration}_iter{iteration}"
         
         print('begin smoothing')
@@ -758,4 +763,3 @@ class MultiArmRRT:
         )
         print('done smoothing')
         return smoothed_paths, f"ReasonSmoothed_time{duration}_iter{iteration}"
- 

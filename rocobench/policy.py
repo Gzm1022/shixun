@@ -71,6 +71,48 @@ class PlannedPathPolicy:
         self.plan_splitted = plan_splitted # if True, the plan is splitted into two parts, one for each robot
         self.timeout = timeout # timeout for each planning step, in number of planning steps
 
+    def sparsify_path(self, path: List[np.ndarray]) -> List[np.ndarray]:
+        """Downsample by actual joint motion instead of a fixed stride."""
+        path_ls = list(path)
+        if len(path_ls) <= 4:
+            return path_ls
+        selected = [path_ls[0]]
+        last = path_ls[0]
+        max_joint_step = 0.18
+        for qpos in path_ls[1:-1]:
+            if np.max(np.abs(qpos - last)) >= max_joint_step:
+                selected.append(qpos)
+                last = qpos
+        tail = path_ls[-3:]
+        for qpos in tail:
+            if len(selected) == 0 or not np.allclose(selected[-1], qpos):
+                selected.append(qpos)
+        return selected
+
+    def validate_sparse_path(self, path: List[np.ndarray]) -> bool:
+        """Check shortcut segments introduced by sparsification."""
+        path_ls = list(path)
+        if len(path_ls) <= 1:
+            return True
+        for q1, q2 in zip(path_ls[:-1], path_ls[1:]):
+            for q in self.rrt_planner.extend_ee_l2(q1, q2):
+                if self.rrt_planner.check_collision(
+                    robot_qpos=q,
+                    physics=self.rrt_planner.physics,
+                    allow_grasp=True,
+                    check_grasp_ids=self.grasp_allowed,
+                    check_relative_pose=self.check_relative_pose,
+                ):
+                    return False
+        return True
+
+    def sparsify_validated_path(self, path: List[np.ndarray]) -> List[np.ndarray]:
+        sparse_path = self.sparsify_path(path)
+        if self.validate_sparse_path(sparse_path):
+            return sparse_path
+        print("Sparse path validation failed; using dense RRT path")
+        return list(path)
+
 
     def ik_ee_poses_to_qpos(self, physics, ee_poses: Dict[str, Pose]) -> Dict[str, np.ndarray]:
         """
@@ -257,8 +299,7 @@ class PlannedPathPolicy:
             # plt.show()
             # breakpoint()
             return None, path[1]
-        path_ls = list(path[0])
-        path_ls = path_ls[::self.control_freq] + path_ls[-3:-1]
+        path_ls = self.sparsify_validated_path(path[0])
         return path_ls, path[1]
     
     def map_qpos_to_ctrl(self, physics, qpos: np.ndarray, include_inhand: bool = True) -> Dict[str, np.ndarray]:
@@ -407,8 +448,7 @@ class PlannedPathPolicy:
             return []
         else:
             print(f"Found a path to return to Home")
-            path_ls = list(path[0])
-            path_ls = path_ls[::self.control_freq] + path_ls[-3:-1]
+            path_ls = self.sparsify_validated_path(path[0])
             actions = []
             for qpos in path_ls:
                 kwargs = self.map_qpos_to_ctrl(physics, qpos, include_inhand=False) # avoid gripper keep grasping after placing
@@ -416,11 +456,11 @@ class PlannedPathPolicy:
             return actions
         
                 
-    def plan(self, env) -> bool: 
+    def plan(self, env) -> Tuple[bool, str]:
         """
         plan a series of actions for each robot
         """  
-        physics = env.physics
+        physics = getattr(env, "physics", env)
         path_ls, reason = self.plan_qpos(physics)
         self.rrt_plan_results = path_ls 
         if path_ls is None:
@@ -458,4 +498,3 @@ class PlannedPathPolicy:
         action = self.action_buffer[self.action_idx]
         self.action_idx += 1
         return action 
- 
