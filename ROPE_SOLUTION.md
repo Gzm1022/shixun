@@ -288,3 +288,12 @@ Bob: x >= -0.40 when z > 0.50
 5. **针对唯一失败样例**中恢复性 pick-place 循环被 5 步 horizon 截断的问题，将 Rope 内部评测步数从 5 放宽为 6，使系统在局部失败后仍有足够步骤完成恢复性放置。
 
 整体来看，本次优化不是单纯调 prompt，而是围绕**动作格式解析 → 候选路径生成 → 碰撞/RRT 反馈 → 任务终止条件 → 评测步长**建立了更完整的 Rope 任务调试闭环。
+
+---
+
+## 十四、公共规划器合并记录（PR #1）
+
+- 动机：合并远程 PR #1 `Improve multi-arm path planning robustness`，提升多机械臂路径规划稳定性，同时保留 main 上 Cabinet release 规划中“已焊接物体视为 in-hand”的修复。
+- 改动点：`rocobench/policy.py` 同时保留 `augment_release_plan_inhand` 和 `sparsify_validated_path`；`rocobench/rrt.py` 修正 near/center sampler 的区间采样；`rocobench/rrt_multi_arm.py` 使用末端局部坐标维护 in-hand 物体相对位姿、放宽 IK 容差、默认只允许末端执行器接触抓取物，并让 split plan 保留强制 waypoints。
+- 运行命令：`python -m compileall run_dialog.py prompting rocobench/envs rocobench/policy.py rocobench/rrt.py rocobench/rrt_multi_arm.py`
+- 验证结果：2026-05-19 语法检查通过；本次未重新跑完整仿真评测，建议按本任务推荐命令复验成功率。

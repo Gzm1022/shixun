@@ -367,19 +367,18 @@ class NearJointsUniformSampler(RRTSampler):
         if self.numpy_random.random() > 0.8:
             return super().__call__()
         center = self.goal_conf if self.numpy_random.random() > 0.5 else self.start_conf
-        sample = center + self.numpy_random.uniform(
-            low=np.clip(
-                center - self.bias * self.value_range,
-                a_min=self.min_values,
-                a_max=self.max_values,
-            ),
-            high=np.clip(
-                center + self.bias * self.value_range,
-                a_min=self.min_values,
-                a_max=self.max_values,
-            ),
+        low = np.clip(
+            center - self.bias * self.value_range,
+            a_min=self.min_values,
+            a_max=self.max_values,
         )
-        return sample
+        high = np.clip(
+            center + self.bias * self.value_range,
+            a_min=self.min_values,
+            a_max=self.max_values,
+        )
+        sample = self.numpy_random.uniform(low=low, high=high)
+        return np.clip(sample, a_min=self.min_values, a_max=self.max_values)
 
 class CenterWaypointsUniformSampler(RRTSampler):
     def __init__(self, bias: float, **kwargs):
@@ -402,18 +401,16 @@ class CenterWaypointsUniformSampler(RRTSampler):
         #     center = self.goal_conf if self.numpy_random.random() > 0.5 else self.start_conf
 
         center = self.goal_conf if self.numpy_random.random() > 0.5 else self.start_conf
-        
-        sample = center + self.numpy_random.uniform(
-            low=np.clip(
-                center - self.bias * self.value_range,
-                a_min=self.min_values,
-                a_max=self.max_values,
-            ),
-            high=np.clip(
-                center + self.bias * self.value_range,
-                a_min=self.min_values,
-                a_max=self.max_values,
-            ),
+
+        low = np.clip(
+            center - self.bias * self.value_range,
+            a_min=self.min_values,
+            a_max=self.max_values,
         )
-        return sample
-  
+        high = np.clip(
+            center + self.bias * self.value_range,
+            a_min=self.min_values,
+            a_max=self.max_values,
+        )
+        sample = self.numpy_random.uniform(low=low, high=high)
+        return np.clip(sample, a_min=self.min_values, a_max=self.max_values)
