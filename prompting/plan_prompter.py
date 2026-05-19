@@ -23,12 +23,12 @@ PACK_PICK_BATCHES = [
     ("banana", "apple"),
 ]
 PACK_ROBOT_ITEM_PREFERENCE = {
-    "ur5e_robotiq": ["bread", "cereal", "banana"],
-    "panda": ["milk", "soda_can", "apple"],
+    "ur5e_robotiq": ["bread", "banana"],
+    "panda": ["milk", "soda_can", "cereal", "apple"],
 }
 PACK_ROBOT_ALLOWED_ITEMS = {
-    "ur5e_robotiq": {"bread", "cereal", "banana"},
-    "panda": {"milk", "soda_can", "apple"},
+    "ur5e_robotiq": {"bread", "banana"},
+    "panda": {"milk", "soda_can", "cereal", "apple"},
 }
 PACK_ROBOT_PRIORITY = ["ur5e_robotiq", "panda"]
 PACK_ITEM_SLOT_PREFERENCE = {
@@ -69,7 +69,7 @@ Each <coord> is a tuple (x,y,z) for gripper location, follow these steps to plan
 13) WAIT is allowed when it prevents collision. For WAIT, keep the robot stationary by repeating its current gripper position in the PATH.
 14) If simultaneous PLACE actions fail or involve large objects, use one PLACE action and one WAIT action.
 15) Follow this fixed batch order unless the named object is already packed: first bread+milk, then cereal+soda_can, then banana+apple.
-16) Prefer assignments: Alice handles bread, cereal, banana; Bob handles milk, soda_can, apple.
+16) Prefer assignments: Alice handles bread and banana; Bob handles milk, soda_can, cereal, and apple. Cereal should be handled by Bob because Alice often times out when placing it.
 16a) If the preferred robot cannot reach its assigned object or keeps failing, let the other robot take over that object while the preferred robot WAITs.
 17) For Pack, prefer one active robot per round: one PICK or one PLACE, while the other robot WAITs. This reduces bin-area collisions and RRT timeouts.
 18) For simultaneous PICK actions, keep Alice's and Bob's first two PATH points separated by at least 0.35 in x-y distance.
@@ -594,6 +594,62 @@ class SingleThreadPrompter:
             )
         return "\n".join(lines)
 
+    def _build_pack_pick_candidate(
+        self,
+        obs: EnvState,
+        chosen_robot: str,
+        chosen_item: str,
+    ) -> str:
+        lines = ["EXECUTE"]
+        for robot_name, agent_name in self.env.robot_name_map.items():
+            if robot_name != chosen_robot:
+                lines.append(
+                    f"NAME {agent_name} ACTION WAIT PATH {self._wait_path(obs, robot_name)}"
+                )
+                continue
+            path = self._pick_path(obs, robot_name, chosen_item)
+            lines.append(
+                f"NAME {agent_name} ACTION PICK {chosen_item} PATH {self._format_path(path)}"
+            )
+        return "\n".join(lines)
+
+    def _pack_pick_candidate_responses(
+        self,
+        obs: EnvState,
+        available_items: List[str],
+        batch_items: List[str],
+    ) -> List[str]:
+        candidates = batch_items if len(batch_items) > 0 else available_items
+        candidates = [item for item in candidates if item in available_items]
+        if len(candidates) == 0:
+            return []
+
+        responses = []
+        seen = set()
+        for allow_handoff in (False, True):
+            choices = []
+            for robot_name in PACK_ROBOT_PRIORITY:
+                if self._held_pack_object(obs, robot_name) is not None:
+                    continue
+                for item in candidates:
+                    cost = self._pack_pick_cost(
+                        obs,
+                        robot_name,
+                        item,
+                        allow_handoff=allow_handoff,
+                    )
+                    if np.isfinite(cost):
+                        choices.append((cost, robot_name, item))
+
+            for _, robot_name, item in sorted(choices):
+                key = (robot_name, item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                responses.append(self._build_pack_pick_candidate(obs, robot_name, item))
+
+        return responses
+
     def _current_pack_batch_items(self, obs: EnvState, available_items: List[str]) -> List[str]:
         if len(available_items) == 0:
             return []
@@ -757,6 +813,73 @@ class SingleThreadPrompter:
         if not made_progress:
             return None
         return "\n".join(lines)
+
+    def build_pack_fallback_candidates(self, obs: EnvState) -> List[str]:
+        """Create ranked Pack fallback plans and let feedback reject collisions.
+
+        A single greedy pick can get stuck when the grasp target is valid but
+        the goal IK collides with a neighboring grocery item. Returning the
+        ranked alternatives lets validation advance to the next item/robot
+        without waiting for an outer retry loop.
+        """
+        if not hasattr(self.env, "item_names") or not hasattr(self.env, "bin_slot_xposes"):
+            return []
+
+        available_items = self._available_pack_items(obs)
+        batch_items = self._current_pack_batch_items(obs, available_items)
+        empty_slots = self._empty_pack_slots(obs)
+        held_by_robot = {
+            robot_name: self._held_pack_object(obs, robot_name)
+            for robot_name in self.env.robot_names
+        }
+        placing_robot = self._choose_placing_robot(held_by_robot)
+
+        responses = []
+        if placing_robot is None and all(held_obj is None for held_obj in held_by_robot.values()):
+            responses = self._pack_pick_candidate_responses(obs, available_items, batch_items)
+        elif placing_robot is not None:
+            held_obj = held_by_robot.get(placing_robot)
+            if held_obj is not None:
+                failed_slots = self._failed_pack_place_slots(held_obj)
+                slot_candidates = [
+                    slot for slot in empty_slots
+                    if slot not in failed_slots
+                ] or empty_slots
+                preferred = [
+                    slot for slot in PACK_ITEM_SLOT_PREFERENCE.get(held_obj, [])
+                    if slot in slot_candidates
+                ]
+                remaining = [slot for slot in slot_candidates if slot not in preferred]
+                ordered_slots = preferred + sorted(
+                    remaining,
+                    key=lambda slot: np.linalg.norm(
+                        self.env.bin_slot_xposes[slot][:2]
+                        - getattr(obs, placing_robot).ee_xpos[:2]
+                    ),
+                )
+                for slot in ordered_slots:
+                    lines = ["EXECUTE"]
+                    for robot_name, agent_name in self.env.robot_name_map.items():
+                        if robot_name != placing_robot:
+                            lines.append(
+                                f"NAME {agent_name} ACTION WAIT PATH {self._wait_path(obs, robot_name)}"
+                            )
+                            continue
+                        target = self.env.bin_slot_xposes[slot].copy()
+                        path = self._interpolate_path(
+                            getattr(obs, robot_name).ee_xpos,
+                            target,
+                            SAFE_PLACE_HEIGHT,
+                        )
+                        lines.append(
+                            f"NAME {agent_name} ACTION PLACE {held_obj} {slot} PATH {self._format_path(path)}"
+                        )
+                    responses.append("\n".join(lines))
+
+        greedy_response = self.build_pack_fallback_response(obs)
+        if greedy_response is not None and greedy_response not in responses:
+            responses.append(greedy_response)
+        return responses
 
     def _sweep_cube_in_contact(self, obs: EnvState, cube: str, contact_name: str) -> bool:
         if cube not in obs.objects:
@@ -1182,6 +1305,8 @@ class SingleThreadPrompter:
     def build_fallback_candidates(self, obs: EnvState) -> List[str]:
         if self.env.__class__.__name__ == "MoveRopeTask":
             return self.build_rope_fallback_candidates(obs)
+        if self.env.__class__.__name__ == "PackGroceryTask":
+            return self.build_pack_fallback_candidates(obs)
         response = self.build_fallback_response(obs)
         return [] if response is None else [response]
 
