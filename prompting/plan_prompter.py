@@ -127,9 +127,10 @@ NAME Dave ACTION <PICK item or PUT item target or WAIT>
 Plan one action per robot to cooperatively move the rope into the groove. Do not show reasoning.
 Phase 1 (PICK): Each robot picks its rope end. Keep PATH z between 0.25 and 0.52; approach directly without lifting high.
   - Alice picks rope_front_end; Bob picks rope_back_end.
-  - Bob (Panda) MUST keep PATH x >= -0.40 when z > 0.55 to avoid IK failure. Approach rope_back_end at low z.
-Phase 2 (PUT): After both hold the rope, lift together to z>=0.58 to clear the obstacle, then place in groove.
+  - Bob (Panda) MUST keep PATH x >= -0.40 when z > 0.50 to avoid IK failure. Approach rope_back_end at low z.
+Phase 2 (PUT): After both hold the rope, move conservatively below z=0.55, then place in groove.
   - Alice: PUT rope_front_end groove_left_end; Bob: PUT rope_back_end groove_right_end.
+  - Bob must first move right to x >= -0.40 at z <= 0.48, then continue toward groove_right_end.
   - This avoids arm collision: Alice (starts left) goes to nearby groove_left; Bob goes right. Paths do NOT cross.
 If IK failed for a waypoint, change that waypoint: raise z or bring x/y closer to the robot's base position.
 EXECUTE
@@ -977,7 +978,7 @@ class SingleThreadPrompter:
                 lines.append(f"NAME {agent_name} ACTION WAIT")
         return "\n".join(lines)
 
-    def build_rope_fallback_response(self, obs: EnvState) -> Optional[str]:
+    def build_rope_fallback_response(self, obs: EnvState, variant: int = 0) -> Optional[str]:
         """Deterministic fallback for MoveRopeTask using current physics state."""
         from rocobench.envs.task_rope import ROPE_FRONT_BODY, ROPE_BACK_BODY
         alice_contacts = getattr(obs, "ur5e_robotiq", None)
@@ -1000,15 +1001,45 @@ class SingleThreadPrompter:
             pts = [p0 + (t_low - p0) * (i + 1) / 4 for i in range(4)]
             return pts
 
-        def _lift_place(start, target, lift_z=0.60):
-            """4-waypoint path that lifts to lift_z then descends to target."""
+        def _lift_place(start, target, lift_z=0.54):
+            """4-waypoint path that lifts conservatively then descends to target."""
             s, t = np.asarray(start[:3], dtype=float), np.asarray(target[:3], dtype=float)
-            lift_z = min(max(float(lift_z), 0.56), 0.64)
-            p1 = s.copy(); p1[2] = lift_z
+            lift_z = min(max(float(lift_z), 0.48), 0.52)
+            p1 = s.copy()
+            p1[2] = min(max(float(s[2]), 0.42), 0.46)
             t_arr = t.copy(); t_arr[2] = max(float(t[2]), 0.42)
             p2 = p1 + (t_arr - p1) * 0.33; p2[2] = lift_z
-            p3 = p1 + (t_arr - p1) * 0.67; p3[2] = max(float(p3[2]), 0.50)
+            p3 = p1 + (t_arr - p1) * 0.67; p3[2] = max(float(p3[2]), 0.48)
             return [p1, p2, p3, t_arr]
+
+        def _bob_rope_place(start, target):
+            """Bob/Panda cannot IK high on the left side; move right before lifting."""
+            s, t = np.asarray(start[:3], dtype=float), np.asarray(target[:3], dtype=float)
+            t_arr = t.copy(); t_arr[2] = max(float(t[2]), 0.42)
+            p1 = s.copy()
+            p1[0] = max(float(p1[0]), -0.38)
+            p1[2] = min(max(float(s[2]), 0.42), 0.48)
+            p2 = p1 + (t_arr - p1) * 0.40
+            p2[2] = 0.52
+            p3 = p1 + (t_arr - p1) * 0.75
+            p3[2] = 0.50
+            return [p1, p2, p3, t_arr]
+
+        def _alice_rope_place(start, target, lift_z=0.52):
+            """Alice/UR5E gets multiple conservative variants for feedback validation."""
+            s, t = np.asarray(start[:3], dtype=float), np.asarray(target[:3], dtype=float)
+            t_arr = t.copy(); t_arr[2] = max(float(t[2]), 0.42)
+            if variant == 1:
+                p1 = s.copy(); p1[2] = min(max(float(s[2]), 0.38), 0.42)
+                p2 = p1 + (t_arr - p1) * 0.25; p2[2] = 0.46
+                p3 = p1 + (t_arr - p1) * 0.65; p3[2] = 0.48
+                return [p1, p2, p3, t_arr]
+            if variant == 2:
+                p1 = s.copy(); p1[1] = min(float(p1[1]), 0.56); p1[2] = 0.42
+                p2 = p1 + (t_arr - p1) * 0.35; p2[2] = 0.48
+                p3 = p1 + (t_arr - p1) * 0.70; p3[2] = 0.48
+                return [p1, p2, p3, t_arr]
+            return _lift_place(start, target, lift_z)
 
         if not alice_holding and not bob_holding:
             a_t = np.asarray(self.env.get_target_pos("Alice", "rope_front_end")[:3], dtype=float)
@@ -1026,12 +1057,12 @@ class SingleThreadPrompter:
             groove_right = np.asarray(self.env.groove_pos.get("groove_right_end", [1.0, 0.50, 0.43]), dtype=float)
             groove_left = np.asarray(self.env.groove_pos.get("groove_left_end", [0.20, 0.50, 0.43]), dtype=float)
             obstacle_tops = [self.env.physics.data.site(n).xpos[2] for n in ["obstacle_wall_front_top", "obstacle_wall_back_top"] if self.env.physics.model.site(n).id >= 0]
-            lift_z = (max(obstacle_tops) + 0.10) if obstacle_tops else 0.60
-            lift_z = min(lift_z, 0.64)
+            lift_z = (max(obstacle_tops) + 0.06) if obstacle_tops else 0.52
+            lift_z = min(lift_z, 0.52)
             # Alice (rope_front, starts left at x≈-1.2) → groove_LEFT (x≈0.20): paths diverge, no crossing with Bob
             # Bob (rope_back, starts at x≈-0.54) → groove_RIGHT (x≈1.00): Bob goes further right
-            a_path = _lift_place(alice_pos, groove_left, lift_z)
-            b_path = _lift_place(bob_pos, groove_right, lift_z)
+            a_path = _alice_rope_place(alice_pos, groove_left, lift_z)
+            b_path = _bob_rope_place(bob_pos, groove_right)
             return (
                 f"EXECUTE\n"
                 f"NAME Alice ACTION PUT rope_front_end groove_left_end PATH {self._format_path(a_path)}\n"
@@ -1057,6 +1088,40 @@ class SingleThreadPrompter:
                 f"NAME Alice ACTION WAIT PATH {self._format_path(a_path)}\n"
                 f"NAME Bob ACTION PICK rope_back_end PATH {self._format_path(b_path)}"
             )
+
+    def build_rope_fallback_candidates(self, obs: EnvState) -> List[str]:
+        """Generate Rope fallback candidates and let feedback validation choose."""
+        candidates = []
+        for variant in range(3):
+            response = self.build_rope_fallback_response(obs, variant=variant)
+            if response is not None and response not in candidates:
+                candidates.append(response)
+        return candidates
+
+    def build_fallback_candidates(self, obs: EnvState) -> List[str]:
+        if self.env.__class__.__name__ == "MoveRopeTask":
+            return self.build_rope_fallback_candidates(obs)
+        response = self.build_fallback_response(obs)
+        return [] if response is None else [response]
+
+    def validate_fallback_candidates(self, obs: EnvState, candidates: List[str]):
+        """Return the first fallback candidate that passes parser and env feedback."""
+        last_feedback = "Fallback plan parse failed"
+        for candidate in candidates:
+            parse_succ, parsed_str, llm_plans = self.parser.parse(obs, candidate)
+            if not parse_succ:
+                last_feedback = parsed_str
+                continue
+            ready_to_execute = True
+            last_feedback = "Fallback plan passed parser"
+            for llm_plan in llm_plans:
+                ready_to_execute, env_feedback = self.feedback_manager.give_feedback(llm_plan)
+                last_feedback = env_feedback if not ready_to_execute else last_feedback
+                if not ready_to_execute:
+                    break
+            if ready_to_execute:
+                return True, candidate, llm_plans, last_feedback
+        return False, (candidates[-1] if candidates else None), None, last_feedback
 
     def build_cabinet_fallback_response(self, obs: EnvState) -> Optional[str]:
         """Deterministic fallback for CabinetTask."""
@@ -1137,25 +1202,18 @@ class SingleThreadPrompter:
         obs_desp = self.env.describe_obs(obs)
 
         if self.fallback_first:
-            fallback_response = self.build_fallback_response(obs)
-            if fallback_response is not None:
+            fallback_candidates = self.build_fallback_candidates(obs)
+            if len(fallback_candidates) > 0:
+                ready_to_execute, fallback_response, llm_plans, curr_feedback = (
+                    self.validate_fallback_candidates(obs, fallback_candidates)
+                )
                 response_history.append(fallback_response)
-                parse_succ, parsed_str, llm_plans = self.parser.parse(obs, fallback_response)
-                curr_feedback = "Fallback-first plan parse failed"
-                ready_to_execute = False
-                if parse_succ:
-                    ready_to_execute = True
-                    curr_feedback = "Fallback-first plan passed parser"
-                    for llm_plan in llm_plans:
-                        ready_to_execute, env_feedback = self.feedback_manager.give_feedback(llm_plan)
-                        curr_feedback = env_feedback if not ready_to_execute else curr_feedback
-                        if not ready_to_execute:
-                            break
 
                 timestamp = datetime.now().strftime("%m%d-%H%M")
                 json.dump(
                     [
-                        {"sender": "FallbackPlanner", "message": fallback_response},
+                        {"sender": "FallbackCandidates", "message": "\n\n--- candidate ---\n\n".join(fallback_candidates)},
+                        {"sender": "SelectedFallback", "message": fallback_response},
                         {"sender": "Feedback", "message": curr_feedback},
                     ],
                     open(f"{save_path}/fallback_first_{timestamp}.json", "w"),
@@ -1232,25 +1290,19 @@ Re-format to strictly follow [Action Output Instruction]!
                 plan_str = parsed_str
                 break  
         if not ready_to_execute:
-            fallback_response = self.build_fallback_response(obs)
-            if fallback_response is not None:
+            fallback_candidates = self.build_fallback_candidates(obs)
+            if len(fallback_candidates) > 0:
+                ready_to_execute, fallback_response, llm_plans, curr_feedback = (
+                    self.validate_fallback_candidates(obs, fallback_candidates)
+                )
                 response_history.append(fallback_response)
-                parse_succ, parsed_str, llm_plans = self.parser.parse(obs, fallback_response)
-                curr_feedback = "Fallback plan parse failed"
-                if parse_succ:
-                    ready_to_execute = True
-                    curr_feedback = "Fallback plan passed parser"
-                    for llm_plan in llm_plans:
-                        ready_to_execute, env_feedback = self.feedback_manager.give_feedback(llm_plan)
-                        curr_feedback = env_feedback if not ready_to_execute else curr_feedback
-                        if not ready_to_execute:
-                            break
                 plan_feedbacks.append(curr_feedback)
 
                 timestamp = datetime.now().strftime("%m%d-%H%M")
                 json.dump(
                     [
-                        {"sender": "FallbackPlanner", "message": fallback_response},
+                        {"sender": "FallbackCandidates", "message": "\n\n--- candidate ---\n\n".join(fallback_candidates)},
+                        {"sender": "SelectedFallback", "message": fallback_response},
                         {"sender": "Feedback", "message": curr_feedback},
                     ],
                     open(f"{save_path}/fallback_{timestamp}.json", "w"),
