@@ -1109,9 +1109,20 @@ class SingleThreadPrompter:
             )
 
     def build_rope_fallback_candidates(self, obs: EnvState) -> List[str]:
-        """Generate Rope fallback candidates and let feedback validation choose."""
+        """Generate Rope fallback candidates and let feedback validation choose.
+
+        Put candidates keep the direct plan first because they are usually fast.
+        Pick candidates prefer obstacle-aware side lanes first: lightweight
+        feedback can miss RRT timeouts caused by low straight-line paths near
+        the obstacle wall.
+        """
         candidates = []
-        for variant in range(3):
+        alice_state = getattr(obs, "ur5e_robotiq", None)
+        bob_state = getattr(obs, "panda", None)
+        alice_holding = any("CB" in c for c in getattr(alice_state, "contacts", [])) if alice_state else False
+        bob_holding = any("CB" in c for c in getattr(bob_state, "contacts", [])) if bob_state else False
+        variant_order = [1, 2, 0] if not (alice_holding and bob_holding) else [0, 1, 2]
+        for variant in variant_order:
             response = self.build_rope_fallback_response(obs, variant=variant)
             if response is not None and response not in candidates:
                 candidates.append(response)
