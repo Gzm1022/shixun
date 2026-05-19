@@ -31,6 +31,14 @@ PACK_ROBOT_ALLOWED_ITEMS = {
     "panda": {"milk", "soda_can", "apple"},
 }
 PACK_ROBOT_PRIORITY = ["ur5e_robotiq", "panda"]
+PACK_ITEM_SLOT_PREFERENCE = {
+    "milk": ["bin_back_left", "bin_back_right", "bin_back_middle"],
+    "cereal": ["bin_back_middle", "bin_back_right", "bin_front_right", "bin_front_middle"],
+    "bread": ["bin_front_left", "bin_front_middle", "bin_front_right"],
+    "soda_can": ["bin_back_right", "bin_front_right", "bin_back_middle"],
+    "banana": ["bin_front_middle", "bin_front_right", "bin_back_middle"],
+    "apple": ["bin_back_middle", "bin_back_right", "bin_front_right"],
+}
 SORT_CUBE_ORDER = ["blue_square", "pink_polygon", "yellow_trapezoid"]
 SORT_CUBE_TARGETS = {
     "blue_square": "panel2",
@@ -620,6 +628,7 @@ class SingleThreadPrompter:
         self,
         obs: EnvState,
         robot_name: str,
+        item: str,
         empty_slots: List[str],
         used_slots: set,
     ) -> Optional[str]:
@@ -629,12 +638,36 @@ class SingleThreadPrompter:
         if len(candidates) == 0:
             return None
 
+        failed_slots = self._failed_pack_place_slots(item)
+        candidates = [slot for slot in candidates if slot not in failed_slots] or candidates
+
+        preferred = [
+            slot for slot in PACK_ITEM_SLOT_PREFERENCE.get(item, [])
+            if slot in candidates
+        ]
+        if len(preferred) > 0:
+            return preferred[0]
+
         robot_state = getattr(obs, robot_name)
         robot_xy = robot_state.ee_xpos[:2]
         return min(
             candidates,
             key=lambda slot: np.linalg.norm(self.env.bin_slot_xposes[slot][:2] - robot_xy),
         )
+
+    def _failed_pack_place_slots(self, item: str) -> set:
+        failed_slots = set()
+        if item is None:
+            return failed_slots
+        slot_names = set(getattr(self.env, "bin_slot_xposes", {}).keys())
+        for failed_plan in self.failed_plans:
+            for line in str(failed_plan).splitlines():
+                if f"PLACE {item} " not in line:
+                    continue
+                for slot in slot_names:
+                    if slot in line:
+                        failed_slots.add(slot)
+        return failed_slots
 
     def _choose_placing_robot(self, held_by_robot: Dict[str, Optional[str]]) -> Optional[str]:
         priority = ["panda", "ur5e_robotiq"]
@@ -680,7 +713,7 @@ class SingleThreadPrompter:
                 continue
 
             if held_obj is not None and len(empty_slots) > 0:
-                slot = self._choose_pack_slot(obs, robot_name, empty_slots, used_slots)
+                slot = self._choose_pack_slot(obs, robot_name, held_obj, empty_slots, used_slots)
                 if slot is None:
                     return None
                 used_slots.add(slot)
